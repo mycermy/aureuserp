@@ -8,6 +8,12 @@ return [
         'group' => 'المشروع',
     ],
 
+    'global-search' => [
+        'project' => 'المشروع',
+        'task'    => 'المهمة',
+        'date'    => 'التاريخ',
+    ],
+
     'form' => [
         'date'                   => 'التاريخ',
         'employee'               => 'الموظف',

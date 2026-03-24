@@ -1,6 +1,11 @@
 <?php
 
 return [
+    'global-search' => [
+        'reference' => 'المرجع',
+        'barcode'   => 'الباركود',
+    ],
+
     'form' => [
         'sections' => [
             'general' => [

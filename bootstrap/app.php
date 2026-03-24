@@ -24,7 +24,6 @@ return Application::configure(basePath: dirname(__DIR__))
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions) {
-        // Handle validation errors for API
         $exceptions->render(function (ValidationException $e, $request) {
             if ($request->is('api/*') || $request->expectsJson()) {
                 return response()->json([
@@ -34,7 +33,6 @@ return Application::configure(basePath: dirname(__DIR__))
             }
         });
 
-        // Handle authentication errors for API
         $exceptions->render(function (AuthenticationException $e, $request) {
             if ($request->is('api/*') || $request->expectsJson()) {
                 return response()->json([
@@ -43,7 +41,6 @@ return Application::configure(basePath: dirname(__DIR__))
             }
         });
 
-        // Handle authorization errors for API (Laravel)
         $exceptions->render(function (AuthorizationException $e, $request) {
             if ($request->is('api/*') || $request->expectsJson()) {
                 return response()->json([
@@ -52,7 +49,6 @@ return Application::configure(basePath: dirname(__DIR__))
             }
         });
 
-        // Handle authorization errors for API (Symfony)
         $exceptions->render(function (AccessDeniedHttpException $e, $request) {
             if ($request->is('api/*') || $request->expectsJson()) {
                 return response()->json([
@@ -69,7 +65,6 @@ return Application::configure(basePath: dirname(__DIR__))
             }
         });
 
-        // Handle general 404 errors for API
         $exceptions->render(function (NotFoundHttpException $e, $request) {
             if ($request->is('api/*') || $request->expectsJson()) {
                 return response()->json([

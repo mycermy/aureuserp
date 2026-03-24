@@ -22,6 +22,15 @@ return [
         ],
     ],
 
+    'config' => [
+        'button-text' => [
+            'today' => 'اليوم',
+            'month' => 'شهر',
+            'week'  => 'أسبوع',
+            'list'  => 'قائمة',
+        ],
+    ],
+
     'view-action' => [
         'title'       => 'عرض',
         'description' => 'عرض طلب الإجازة',

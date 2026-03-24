@@ -1,6 +1,11 @@
 <?php
 
 return [
+    'global-search' => [
+        'email' => 'البريد الإلكتروني',
+        'phone' => 'الهاتف',
+    ],
+
     'form' => [
         'sections' => [
             'general' => [

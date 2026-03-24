@@ -7,6 +7,12 @@ return [
         'title' => 'عروض الأسعار',
     ],
 
+    'global-search' => [
+        'customer'  => 'العميل',
+        'reference' => 'المرجع',
+        'amount'    => 'المبلغ',
+    ],
+
     'form' => [
         'section' => [
             'general' => [
@@ -68,6 +74,20 @@ return [
                             'amount'              => 'المبلغ',
                             'margin-percentage'   => 'الهامش (%)',
                             'discount-percentage' => 'الخصم (%)',
+                        ],
+
+                        'notifications' => [
+                            'quantity-below-delivered' => [
+                                'title' => 'لا يمكن تقليل الكمية',
+                                'body'  => 'لا يمكنك تقليل الكمية إلى أقل من الكمية المسلّمة (:qty).',
+                            ],
+                        ],
+
+                        'delete-action' => [
+                            'error' => [
+                                'title' => 'لا يمكن حذف المنتج',
+                                'body'  => 'لا يمكن حذف المنتجات من أمر بيع مؤكد.',
+                            ],
                         ],
                     ],
 
