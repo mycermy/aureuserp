@@ -511,6 +511,16 @@ class InstallCommand extends Command
             return $command;
         }
 
+        if (PHP_OS_FAMILY === 'Darwin') {
+            $gtimeout = trim((string) shell_exec('which gtimeout 2>/dev/null'));
+
+            if ($gtimeout !== '') {
+                return "gtimeout {$seconds} {$command}";
+            }
+
+            return $command;
+        }
+
         return "timeout {$seconds} {$command}";
     }
 }
