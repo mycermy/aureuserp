@@ -1,0 +1,22 @@
+{
+    "name": "zrm/workshop",
+    "description": "Workshop Automation - Car Workshop Demo Data",
+    "authors": [
+        {
+            "name": "Zulfadli Resources",
+            "email": "zulfadli.resources@gmail.com"
+        }
+    ],
+    "extra": {
+        "laravel": {
+            "providers": [],
+            "aliases": {}
+        }
+    },
+    "autoload": {
+        "psr-4": {
+            "Zrm\\Workshop\\": "src/",
+            "Zrm\\Workshop\\Database\\Seeders\\": "database/seeders/"
+        }
+    }
+}
