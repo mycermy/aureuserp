@@ -1,6 +1,6 @@
 <?php
 
-namespace Zrm\Workshop\Database\Seeders;
+namespace Zrm\WorkshopDemo\Database\Seeders;
 
 use Carbon\Carbon;
 use Illuminate\Database\Seeder;

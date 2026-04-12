@@ -294,7 +294,7 @@ These IDs are stable after a fresh `php artisan migrate --seed` on a clean insta
 
 **Package:** `zrm/workshop`
 **Namespace:** `Zrm\Workshop\`
-**Path:** `plugins/zrm/workshop/`
+**Path:** `plugins/zrm/workshop-demo/`
 **Author:** Zulfadli Resources
 
 ### Purpose
@@ -497,3 +497,11 @@ CR  Account Receivable        [121000]  ← settle receivable
 - It consumes **2× Brake Pads** (COGS $90) and **4L Engine Oil 10W40** (COGS $80) from WH/Stock.
 - A COGS entry `WKSHP/COGS/PEND1` (move 16) is also created: DR Cost of Goods Sold $170 / CR Stock Valuation $170.
 - Invoice total: $312 revenue ($160 brake pads + $152 engine oil). Invoice is `not_paid` — shows on the Customer Invoices bar chart.
+
+
+###
+php artisan db:wipe --force && 
+php artisan erp:install --force --no-interaction --admin-name="Admin" --admin-email="admin@example.com" --admin-password="password"
+
+for plugin in accounting inventories sales purchases contacts; do echo "== Installing ${plugin} =="; php artisan "${plugin}:install" --no-interaction || exit $?; done
+

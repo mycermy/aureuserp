@@ -28,5 +28,6 @@ return [
     Webkul\FullCalendar\FullCalendarServiceProvider::class,
     Webkul\Timesheet\TimesheetServiceProvider::class,
     Webkul\Website\WebsiteServiceProvider::class,
+    Zrm\WorkshopDemo\WorkshopDemoServiceProvider::class,
     Webkul\PluginManager\PluginManagerServiceProvider::class,
 ];

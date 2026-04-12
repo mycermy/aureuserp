@@ -1,5 +1,5 @@
 {
-    "name": "zrm/workshop",
+    "name": "zrm/workshop-demo",
     "description": "Workshop Automation - Car Workshop Demo Data",
     "authors": [
         {
@@ -9,14 +9,16 @@
     ],
     "extra": {
         "laravel": {
-            "providers": [],
+            "providers": [
+                "Zrm\\WorkshopDemo\\WorkshopDemoServiceProvider"
+            ],
             "aliases": {}
         }
     },
     "autoload": {
         "psr-4": {
-            "Zrm\\Workshop\\": "src/",
-            "Zrm\\Workshop\\Database\\Seeders\\": "database/seeders/"
+            "Zrm\\WorkshopDemo\\": "src/",
+            "Zrm\\WorkshopDemo\\Database\\Seeders\\": "database/seeders/"
         }
     }
 }
