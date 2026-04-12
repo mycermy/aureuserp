@@ -1,7 +1,7 @@
 # AureusERP — System Reference
 
-> **Purpose:** Development reference for team members continuing work on the `zrm/workshop` demo plugin and related AureusERP customisation.
-> **Last updated:** April 9, 2026 (rev 3)
+> **Purpose:** Development reference for team members continuing work on the `zrm/workshop-demo` plugin and related AureusERP customisation.
+> **Last updated:** April 12, 2026 (rev 4)
 
 ---
 
@@ -46,7 +46,7 @@ Plugins live under `plugins/` in two vendor namespaces:
 plugins/
   webkul/     ← core ERP plugins (packaged by Webkul / AureusERP team)
   zrm/        ← custom plugins (Zulfadli Resources)
-    workshop/ ← car workshop demo data plugin
+    workshop-demo/ ← car workshop demo data plugin
 ```
 
 Each plugin follows this structure:
@@ -234,7 +234,7 @@ These IDs are stable after a fresh `php artisan migrate --seed` on a clean insta
 |---|---|---|
 | Company | 1 | DummyCorp LLC |
 | Admin User | 1 | Admin |
-| Currency (USD) | 1 | USD |
+| Currency (default from `APP_CURRENCY`) | 34 | MYR |
 
 ### Units of Measure
 
@@ -286,14 +286,15 @@ These IDs are stable after a fresh `php artisan migrate --seed` on a clean insta
 | 16 | 211000 | Account Payable | liability_payable |
 | 27 | 400000 | Product Sales | income |
 | 32 | 500000 | Cost of Goods Sold | expense_direct_cost |
-| 46 | 101501 | Cash (Bank) | asset_cash |
+| 45 | 101401 | Bank | asset_cash |
+| 46 | 101501 | Cash | asset_cash |
 
 ---
 
 ## Workshop Demo Plugin
 
-**Package:** `zrm/workshop`
-**Namespace:** `Zrm\Workshop\`
+**Package:** `zrm/workshop-demo`
+**Namespace:** `Zrm\WorkshopDemo\`
 **Path:** `plugins/zrm/workshop-demo/`
 **Author:** Zulfadli Resources
 
@@ -314,7 +315,7 @@ Demonstrates a complete car workshop business flow in AureusERP:
 ### Running the Seeder
 
 ```bash
-php artisan db:seed --class="Zrm\\Workshop\\Database\\Seeders\\WorkshopDemoSeeder"
+php artisan db:seed --class="Zrm\\WorkshopDemo\\Database\\Seeders\\WorkshopDemoSeeder"
 ```
 
 The seeder is **idempotent** — safe to run multiple times. Each method checks for existing records by name before inserting.
@@ -434,7 +435,7 @@ CR  Account Payable           [211000]  ← now formally owe the supplier
 **Vendor Payment (bank entry):**
 ```
 DR  Account Payable           [211000]  ← settle payable
-CR  Bank / Cash               [101501]  ← cash out
+CR  Bank / Cash               [101401 / 101501]  ← cash out
 ```
 
 **Customer Invoice (out_invoice):**
@@ -451,7 +452,7 @@ CR  Stock Valuation           [110100]  ← inventory reduced
 
 **Customer Receipt (bank entry):**
 ```
-DR  Bank / Cash               [101501]  ← cash received  
+DR  Bank / Cash               [101401 / 101501]  ← cash received  
 CR  Account Receivable        [121000]  ← settle receivable
 ```
 
@@ -503,5 +504,5 @@ CR  Account Receivable        [121000]  ← settle receivable
 php artisan db:wipe --force && 
 php artisan erp:install --force --no-interaction --admin-name="Admin" --admin-email="admin@example.com" --admin-password="password"
 
-for plugin in accounting inventories sales purchases contacts; do echo "== Installing ${plugin} =="; php artisan "${plugin}:install" --no-interaction || exit $?; done
+php artisan workshop-demo:install --no-interaction
 

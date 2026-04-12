@@ -139,7 +139,7 @@ class WorkshopDemoSeeder extends Seeder
 
         if ($existing) {
             $this->categoryId = $existing->id;
-            $this->command->info('  (already exists, id='.$this->categoryId.')');
+            $this->command->info('  (already exists, id=' . $this->categoryId . ')');
 
             return;
         }
@@ -154,7 +154,7 @@ class WorkshopDemoSeeder extends Seeder
             'updated_at'  => now(),
         ]);
 
-        $this->command->info('  → id='.$this->categoryId);
+        $this->command->info('  → id=' . $this->categoryId);
     }
 
     // ── 2. Products ─────────────────────────────────────────────────
@@ -241,7 +241,7 @@ class WorkshopDemoSeeder extends Seeder
 
             if ($existing) {
                 $this->productIds[$data['key']] = $existing->id;
-                $this->command->info('  (skip) '.$data['name'].' — already exists id='.$existing->id);
+                $this->command->info('  (skip) ' . $data['name'] . ' — already exists id=' . $existing->id);
 
                 continue;
             }
@@ -267,7 +267,7 @@ class WorkshopDemoSeeder extends Seeder
             ]);
 
             $this->productIds[$data['key']] = $id;
-            $this->command->info('  + '.$data['name'].' (id='.$id.')');
+            $this->command->info('  + ' . $data['name'] . ' (id=' . $id . ')');
         }
     }
 
@@ -317,7 +317,7 @@ class WorkshopDemoSeeder extends Seeder
             ->first();
 
         if ($existing) {
-            $this->command->info('  (skip) '.$data['name'].' — already exists id='.$existing->id);
+            $this->command->info('  (skip) ' . $data['name'] . ' — already exists id=' . $existing->id);
 
             return $existing->id;
         }
@@ -336,7 +336,7 @@ class WorkshopDemoSeeder extends Seeder
             'updated_at'    => now(),
         ]);
 
-        $this->command->info('  + '.$data['name'].' (id='.$id.')');
+        $this->command->info('  + ' . $data['name'] . ' (id=' . $id . ')');
 
         return $id;
     }
@@ -574,7 +574,7 @@ class WorkshopDemoSeeder extends Seeder
         $existing = DB::table('purchases_orders')->where('name', $reference)->first();
 
         if ($existing) {
-            $this->command->info('  (skip) '.$reference.' — already exists');
+            $this->command->info('  (skip) ' . $reference . ' — already exists');
             $this->ensurePurchaseAccounting($existing->id, $reference, $lines, $receivedAt);
 
             return;
@@ -582,7 +582,7 @@ class WorkshopDemoSeeder extends Seeder
 
         // ── Compute totals ──────────────────────────────────────────
         $untaxedAmount = array_sum(array_map(
-            fn ($l) => $l['qty'] * $l['price_unit'],
+            fn($l) => $l['qty'] * $l['price_unit'],
             $lines
         ));
 
@@ -618,7 +618,7 @@ class WorkshopDemoSeeder extends Seeder
 
         // ── Create receipt operation (inventory incoming) ───────────
         $operationId = DB::table('inventories_operations')->insertGetId([
-            'name'                    => 'WH/IN/'.$reference,
+            'name'                    => 'WH/IN/' . $reference,
             'origin'                  => $reference,
             'move_type'               => 'direct',
             'state'                   => 'done',
@@ -712,7 +712,7 @@ class WorkshopDemoSeeder extends Seeder
             // Inventory move line
             DB::table('inventories_move_lines')->insert([
                 'state'                   => 'done',
-                'reference'               => 'WH/IN/'.$reference,
+                'reference'               => 'WH/IN/' . $reference,
                 'qty'                     => $line['qty'],
                 'uom_qty'                 => $line['qty'],
                 'is_picked'               => 1,
@@ -760,7 +760,7 @@ class WorkshopDemoSeeder extends Seeder
         $existing = DB::table('sales_orders')->where('name', $reference)->first();
 
         if ($existing) {
-            $this->command->info('  (skip) '.$reference.' — already exists');
+            $this->command->info('  (skip) ' . $reference . ' — already exists');
             $this->ensureSaleAccounting($existing->id, $reference, $customerId, $lines, $deliveredAt);
 
             return;
@@ -768,12 +768,12 @@ class WorkshopDemoSeeder extends Seeder
 
         // Totals
         $amountUntaxed = array_sum(array_map(
-            fn ($l) => $l['qty'] * $l['price_unit'],
+            fn($l) => $l['qty'] * $l['price_unit'],
             $lines
         ));
 
         $cogsTotal = array_sum(array_map(
-            fn ($l) => $l['qty'] * $l['purchase_price'],
+            fn($l) => $l['qty'] * $l['purchase_price'],
             $lines
         ));
 
@@ -809,7 +809,7 @@ class WorkshopDemoSeeder extends Seeder
 
         // Delivery operation (stock → customer)
         $operationId = DB::table('inventories_operations')->insertGetId([
-            'name'                    => 'WH/OUT/'.$reference,
+            'name'                    => 'WH/OUT/' . $reference,
             'origin'                  => $reference,
             'move_type'               => 'direct',
             'state'                   => 'done',
@@ -909,7 +909,7 @@ class WorkshopDemoSeeder extends Seeder
 
                 DB::table('inventories_move_lines')->insert([
                     'state'                   => 'done',
-                    'reference'               => 'WH/OUT/'.$reference,
+                    'reference'               => 'WH/OUT/' . $reference,
                     'qty'                     => $line['qty'],
                     'uom_qty'                 => $line['qty'],
                     'is_picked'               => 1,
@@ -960,16 +960,16 @@ class WorkshopDemoSeeder extends Seeder
     private function createGoodsReceivedEntry(string $reference, array $lines, Carbon $receivedAt): void
     {
         $suffix = substr($reference, strrpos($reference, '/') + 1);
-        $entryName = 'WKSHP/RECV/'.$suffix;
+        $entryName = 'WKSHP/RECV/' . $suffix;
 
         if (DB::table('accounts_account_moves')->where('name', $entryName)->exists()) {
-            $this->command->info('  (skip) Goods-received entry '.$entryName.' — already exists');
+            $this->command->info('  (skip) Goods-received entry ' . $entryName . ' — already exists');
 
             return;
         }
 
         $total = (float) array_sum(array_map(
-            fn ($l) => $l['qty'] * $l['price_unit'],
+            fn($l) => $l['qty'] * $l['price_unit'],
             $lines
         ));
 
@@ -1027,7 +1027,7 @@ class WorkshopDemoSeeder extends Seeder
                 'product_id'               => $productId,
                 'uom_id'                   => $line['uom_id'],
                 'creator_id'               => $this->userId,
-                'name'                     => $line['name'].' — Goods Received',
+                'name'                     => $line['name'] . ' — Goods Received',
                 'display_type'             => 'product',
                 'date'                     => $receivedAt->toDateString(),
                 'quantity'                 => $line['qty'],
@@ -1063,7 +1063,7 @@ class WorkshopDemoSeeder extends Seeder
                 'product_id'               => $productId,
                 'uom_id'                   => $line['uom_id'],
                 'creator_id'               => $this->userId,
-                'name'                     => $line['name'].' — Interim Clearing',
+                'name'                     => $line['name'] . ' — Interim Clearing',
                 'display_type'             => 'product',
                 'date'                     => $receivedAt->toDateString(),
                 'quantity'                 => $line['qty'],
@@ -1111,7 +1111,7 @@ class WorkshopDemoSeeder extends Seeder
     private function ensurePurchaseAccounting(int $orderId, string $reference, array $lines, Carbon $billDate): void
     {
         $billSuffix = substr($reference, strrpos($reference, '/') + 1);
-        $billName = 'WKSHP/BILL/'.$billSuffix;
+        $billName = 'WKSHP/BILL/' . $billSuffix;
 
         // Always create the goods-received stock valuation entry (has its own idempotency).
         $this->createGoodsReceivedEntry($reference, $lines, $billDate);
@@ -1122,7 +1122,7 @@ class WorkshopDemoSeeder extends Seeder
             ->exists();
 
         if ($alreadyLinked) {
-            $this->command->info('  (skip accounting) Vendor bill already exists for '.$reference);
+            $this->command->info('  (skip accounting) Vendor bill already exists for ' . $reference);
             $existingMove = DB::table('accounts_account_moves')->where('name', $billName)->first();
 
             if ($existingMove) {
@@ -1133,7 +1133,7 @@ class WorkshopDemoSeeder extends Seeder
         }
 
         $total = (float) array_sum(array_map(
-            fn ($l) => $l['qty'] * $l['price_unit'],
+            fn($l) => $l['qty'] * $l['price_unit'],
             $lines
         ));
 
@@ -1224,7 +1224,7 @@ class WorkshopDemoSeeder extends Seeder
             'account_id'               => $this->acctPayable,
             'partner_id'               => $this->supplierPartnerId,
             'creator_id'               => $this->userId,
-            'name'                     => $reference.' — Payable',
+            'name'                     => $reference . ' — Payable',
             'display_type'             => 'payment_term',
             'date'                     => $billDate->toDateString(),
             'invoice_date'             => $billDate->toDateString(),
@@ -1287,7 +1287,7 @@ class WorkshopDemoSeeder extends Seeder
     private function ensureSaleAccounting(int $orderId, string $reference, int $customerId, array $lines, Carbon $invoiceDate): void
     {
         $invoiceSuffix = substr($reference, strrpos($reference, '/') + 1);
-        $invoiceName = 'WKSHP/INV/'.$invoiceSuffix;
+        $invoiceName = 'WKSHP/INV/' . $invoiceSuffix;
 
         // Idempotency: skip if invoice already linked to this SO via invoice_origin
         $alreadyLinked = DB::table('accounts_account_moves')
@@ -1296,7 +1296,7 @@ class WorkshopDemoSeeder extends Seeder
             ->exists();
 
         if ($alreadyLinked) {
-            $this->command->info('  (skip accounting) Customer invoice already exists for '.$reference);
+            $this->command->info('  (skip accounting) Customer invoice already exists for ' . $reference);
             $existingMove = DB::table('accounts_account_moves')->where('name', $invoiceName)->first();
 
             if ($existingMove) {
@@ -1307,12 +1307,12 @@ class WorkshopDemoSeeder extends Seeder
         }
 
         $total = (float) array_sum(array_map(
-            fn ($l) => $l['qty'] * $l['price_unit'],
+            fn($l) => $l['qty'] * $l['price_unit'],
             $lines
         ));
 
         $cogsTotal = (float) array_sum(array_map(
-            fn ($l) => str_starts_with($l['product_key'], 'labor') ? 0.0 : $l['qty'] * $l['purchase_price'],
+            fn($l) => str_starts_with($l['product_key'], 'labor') ? 0.0 : $l['qty'] * $l['purchase_price'],
             $lines
         ));
 
@@ -1403,7 +1403,7 @@ class WorkshopDemoSeeder extends Seeder
             'account_id'               => $this->acctReceivable,
             'partner_id'               => $customerId,
             'creator_id'               => $this->userId,
-            'name'                     => $reference.' — Receivable',
+            'name'                     => $reference . ' — Receivable',
             'display_type'             => 'payment_term',
             'date'                     => $invoiceDate->toDateString(),
             'invoice_date'             => $invoiceDate->toDateString(),
@@ -1467,7 +1467,7 @@ class WorkshopDemoSeeder extends Seeder
             return;
         }
 
-        $paymentName = 'WKSHP/BNK/PAY/'.$suffix;
+        $paymentName = 'WKSHP/BNK/PAY/' . $suffix;
 
         $paymentMoveId = DB::table('accounts_account_moves')->insertGetId([
             'name'                               => $paymentName,
@@ -1510,7 +1510,7 @@ class WorkshopDemoSeeder extends Seeder
             'account_id'               => $this->acctPayable,
             'partner_id'               => $this->supplierPartnerId,
             'creator_id'               => $this->userId,
-            'name'                     => 'Vendor Payment — '.$suffix,
+            'name'                     => 'Vendor Payment — ' . $suffix,
             'display_type'             => 'payment_term',
             'date'                     => $paymentDate->toDateString(),
             'quantity'                 => 1,
@@ -1544,7 +1544,7 @@ class WorkshopDemoSeeder extends Seeder
             'account_id'               => $this->acctBank,
             'partner_id'               => $this->supplierPartnerId,
             'creator_id'               => $this->userId,
-            'name'                     => 'Bank — '.$suffix,
+            'name'                     => 'Bank — ' . $suffix,
             'display_type'             => 'product',
             'date'                     => $paymentDate->toDateString(),
             'quantity'                 => 1,
@@ -1570,7 +1570,7 @@ class WorkshopDemoSeeder extends Seeder
             'state'                          => 'paid',
             'payment_type'                   => 'outbound',
             'partner_type'                   => 'supplier',
-            'memo'                           => 'Payment for PO/'.$suffix,
+            'memo'                           => 'Payment for PO/' . $suffix,
             'date'                           => $paymentDate->toDateString(),
             'amount'                         => $total,
             'amount_company_currency_signed' => -$total,
@@ -1618,7 +1618,7 @@ class WorkshopDemoSeeder extends Seeder
             return;
         }
 
-        $paymentName = 'WKSHP/BNK/REC/'.$suffix;
+        $paymentName = 'WKSHP/BNK/REC/' . $suffix;
 
         $paymentMoveId = DB::table('accounts_account_moves')->insertGetId([
             'name'                               => $paymentName,
@@ -1661,7 +1661,7 @@ class WorkshopDemoSeeder extends Seeder
             'account_id'               => $this->acctBank,
             'partner_id'               => $customerId,
             'creator_id'               => $this->userId,
-            'name'                     => 'Bank — '.$suffix,
+            'name'                     => 'Bank — ' . $suffix,
             'display_type'             => 'product',
             'date'                     => $paymentDate->toDateString(),
             'quantity'                 => 1,
@@ -1695,7 +1695,7 @@ class WorkshopDemoSeeder extends Seeder
             'account_id'               => $this->acctReceivable,
             'partner_id'               => $customerId,
             'creator_id'               => $this->userId,
-            'name'                     => 'Customer Receipt — '.$suffix,
+            'name'                     => 'Customer Receipt — ' . $suffix,
             'display_type'             => 'payment_term',
             'date'                     => $paymentDate->toDateString(),
             'quantity'                 => 1,
@@ -1721,7 +1721,7 @@ class WorkshopDemoSeeder extends Seeder
             'state'                          => 'paid',
             'payment_type'                   => 'inbound',
             'partner_type'                   => 'customer',
-            'memo'                           => 'Receipt for SO/'.$suffix,
+            'memo'                           => 'Receipt for SO/' . $suffix,
             'date'                           => $paymentDate->toDateString(),
             'amount'                         => $total,
             'amount_company_currency_signed' => $total,
@@ -1768,7 +1768,7 @@ class WorkshopDemoSeeder extends Seeder
      */
     private function createCogsEntry(string $soRef, Carbon $entryDate, array $lines, float $cogsTotal): void
     {
-        $entryName = 'WKSHP/COGS/'.substr($soRef, strrpos($soRef, '/') + 1);
+        $entryName = 'WKSHP/COGS/' . substr($soRef, strrpos($soRef, '/') + 1);
 
         // Idempotency
         if (DB::table('accounts_account_moves')->where('name', $entryName)->exists()) {
@@ -1830,7 +1830,7 @@ class WorkshopDemoSeeder extends Seeder
                 'product_id'               => $this->productIds[$line['product_key']],
                 'uom_id'                   => $line['uom_id'],
                 'creator_id'               => $this->userId,
-                'name'                     => 'COGS — '.$line['name'],
+                'name'                     => 'COGS — ' . $line['name'],
                 'display_type'             => 'product',
                 'date'                     => $entryDate->toDateString(),
                 'quantity'                 => $line['qty'],
@@ -1865,7 +1865,7 @@ class WorkshopDemoSeeder extends Seeder
                 'product_id'               => $this->productIds[$line['product_key']],
                 'uom_id'                   => $line['uom_id'],
                 'creator_id'               => $this->userId,
-                'name'                     => 'Stock — '.$line['name'],
+                'name'                     => 'Stock — ' . $line['name'],
                 'display_type'             => 'product',
                 'date'                     => $entryDate->toDateString(),
                 'quantity'                 => $line['qty'],
@@ -1938,7 +1938,7 @@ class WorkshopDemoSeeder extends Seeder
         $this->command->info('  📦  CLOSING STOCK & INVENTORY VALUATION (WH/Stock)');
         $this->command->info('─────────────────────────────────────────────────────────────');
         $this->command->info(sprintf('  %-34s %6s %8s %12s', 'Product', 'UOM', 'Qty', 'Value (USD)'));
-        $this->command->info('  '.str_repeat('-', 65));
+        $this->command->info('  ' . str_repeat('-', 65));
 
         $storableKeys = ['oil_0w20', 'oil_10w40', 'brake_pads', 'spark_plugs'];
 
@@ -1979,7 +1979,7 @@ class WorkshopDemoSeeder extends Seeder
             ));
         }
 
-        $this->command->info('  '.str_repeat('-', 65));
+        $this->command->info('  ' . str_repeat('-', 65));
         $this->command->info(sprintf('  %-34s %6s %8s %12.2f', 'TOTAL INVENTORY VALUE', '', '', $totalValue));
         $this->command->info('─────────────────────────────────────────────────────────────');
 
@@ -1987,7 +1987,7 @@ class WorkshopDemoSeeder extends Seeder
         $this->command->info('  💰  SALES MARGIN SUMMARY');
         $this->command->info('─────────────────────────────────────────────────────────────');
         $this->command->info(sprintf('  %-20s %12s %12s %12s', 'Order', 'Revenue', 'COGS', 'Gross Margin'));
-        $this->command->info('  '.str_repeat('-', 60));
+        $this->command->info('  ' . str_repeat('-', 60));
 
         $orders = DB::table('sales_orders')
             ->where('name', 'like', 'SO/WKSHP/%')
@@ -2022,7 +2022,7 @@ class WorkshopDemoSeeder extends Seeder
             ));
         }
 
-        $this->command->info('  '.str_repeat('-', 60));
+        $this->command->info('  ' . str_repeat('-', 60));
         $this->command->info(sprintf(
             '  %-20s %12.2f %12.2f %12.2f',
             'TOTAL',
@@ -2218,13 +2218,13 @@ class WorkshopDemoSeeder extends Seeder
             ],
         ];
 
-        $total = (float) array_sum(array_map(fn ($l) => $l['qty'] * $l['price_unit'], $lines));
-        $cogsTotal = (float) array_sum(array_map(fn ($l) => $l['qty'] * $l['purchase_price'], $lines));
+        $total = (float) array_sum(array_map(fn($l) => $l['qty'] * $l['price_unit'], $lines));
+        $cogsTotal = (float) array_sum(array_map(fn($l) => $l['qty'] * $l['purchase_price'], $lines));
 
         // ── Delivery operation (stock → customer) ──────────────────
 
         $operationId = DB::table('inventories_operations')->insertGetId([
-            'name'                    => 'WH/OUT/'.$invoiceName,
+            'name'                    => 'WH/OUT/' . $invoiceName,
             'state'                   => 'done',
             'origin'                  => $invoiceName,
             'move_type'               => 'direct',
@@ -2277,7 +2277,7 @@ class WorkshopDemoSeeder extends Seeder
 
             DB::table('inventories_move_lines')->insert([
                 'state'                   => 'done',
-                'reference'               => 'WH/OUT/'.$invoiceName,
+                'reference'               => 'WH/OUT/' . $invoiceName,
                 'qty'                     => $line['qty'],
                 'uom_qty'                 => $line['qty'],
                 'is_picked'               => 1,
@@ -2396,7 +2396,7 @@ class WorkshopDemoSeeder extends Seeder
             'account_id'               => $this->acctReceivable,
             'partner_id'               => $this->customer1Id,
             'creator_id'               => $this->userId,
-            'name'                     => $invoiceName.' — Receivable',
+            'name'                     => $invoiceName . ' — Receivable',
             'display_type'             => 'payment_term',
             'date'                     => $invoiceDate->toDateString(),
             'invoice_date'             => $invoiceDate->toDateString(),
