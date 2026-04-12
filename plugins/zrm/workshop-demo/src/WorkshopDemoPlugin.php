@@ -23,6 +23,13 @@ class WorkshopDemoPlugin implements Plugin
         if (! Package::isPluginInstalled($this->getId())) {
             return;
         }
+
+        $panel->when($panel->getId() == 'admin', function (Panel $panel): void {
+            $panel->discoverPages(
+                in: __DIR__ . '/Filament/Pages',
+                for: 'Zrm\\WorkshopDemo\\Filament\\Pages'
+            );
+        });
     }
 
     public function boot(Panel $panel): void
