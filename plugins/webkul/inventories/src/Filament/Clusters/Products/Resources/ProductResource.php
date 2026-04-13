@@ -15,9 +15,9 @@ use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Components\Utilities\Set;
 use Filament\Schemas\Schema;
+use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Table;
 use Illuminate\Support\Facades\Auth;
-use Webkul\Product\Filament\Resources\ProductResource as BaseProductResource;
 use Webkul\Field\Filament\Traits\HasCustomFields;
 use Webkul\Inventory\Enums\MoveState;
 use Webkul\Inventory\Enums\ProductTracking;
@@ -34,6 +34,7 @@ use Webkul\Inventory\Models\Move;
 use Webkul\Inventory\Models\Product;
 use Webkul\Inventory\Settings\TraceabilitySettings;
 use Webkul\Product\Enums\ProductType;
+use Webkul\Product\Filament\Resources\ProductResource as BaseProductResource;
 
 class ProductResource extends BaseProductResource
 {
@@ -86,7 +87,7 @@ class ProductResource extends BaseProductResource
                             ->selectablePlaceholder(false)
                             ->options(ProductTracking::class)
                             ->default(ProductTracking::QTY->value)
-                            ->visible(fn (Get $get, TraceabilitySettings $settings): bool => $settings->enable_lots_serial_numbers && (bool) $get('is_storable'))
+                            ->visible(fn(Get $get, TraceabilitySettings $settings): bool => $settings->enable_lots_serial_numbers && (bool) $get('is_storable'))
                             ->live()
                             ->afterStateUpdated(function (Set $set, Get $get) {
                                 if ($get('tracking') == ProductTracking::QTY->value) {
@@ -102,7 +103,7 @@ class ProductResource extends BaseProductResource
                             ->relationship(
                                 'routes',
                                 'name',
-                                fn ($query) => $query->where('product_selectable', true)
+                                fn($query) => $query->where('product_selectable', true)
                             )
                             ->hintIcon('heroicon-m-question-mark-circle', tooltip: __('inventories::filament/clusters/products/resources/product.form.sections.inventory.fieldsets.operation.fields.routes-hint-tooltip')),
                     ]),
@@ -160,9 +161,9 @@ class ProductResource extends BaseProductResource
                             ->maxValue(99999999999)
                             ->hintIcon('heroicon-m-question-mark-circle', tooltip: __('inventories::filament/clusters/products/resources/product.form.sections.inventory.fieldsets.traceability.fields.alert-date-hint-tooltip')),
                     ])
-                    ->visible(fn (Get $get): bool => (bool) $get('use_expiration_date')),
+                    ->visible(fn(Get $get): bool => (bool) $get('use_expiration_date')),
             ])
-            ->visible(fn (Get $get): bool => $get('type') == ProductType::GOODS);
+            ->visible(fn(Get $get): bool => $get('type') == ProductType::GOODS);
 
         $firstGroupChildComponents[] = Section::make(__('inventories::filament/clusters/products/resources/product.form.sections.additional.title'))
             ->visible(! empty($customFormFields = static::getCustomFormFields()))
@@ -177,7 +178,19 @@ class ProductResource extends BaseProductResource
 
     public static function table(Table $table): Table
     {
-        return BaseProductResource::table($table);
+        $table = BaseProductResource::table($table);
+
+        $table->pushColumns([
+            TextColumn::make('on_hand_quantity')
+                ->label(__('inventories::filament/clusters/products/resources/product.table.columns.on-hand-quantity'))
+                ->numeric()
+                ->default(0)
+                ->sortable(false)
+                ->toggleable()
+                ->visible(fn(): bool => true),
+        ]);
+
+        return $table;
     }
 
     public static function infolist(Schema $schema): Schema
@@ -263,9 +276,9 @@ class ProductResource extends BaseProductResource
                                     ->icon('heroicon-o-clock'),
                             ]),
                     ])
-                    ->visible(fn ($record): bool => (bool) $record->use_expiration_date),
+                    ->visible(fn($record): bool => (bool) $record->use_expiration_date),
             ])
-            ->visible(fn ($record): bool => $record->type == ProductType::GOODS);
+            ->visible(fn($record): bool => $record->type == ProductType::GOODS);
 
         $components[0]->childComponents($firstGroupChildComponents);
 
