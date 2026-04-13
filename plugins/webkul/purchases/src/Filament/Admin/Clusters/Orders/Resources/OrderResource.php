@@ -176,7 +176,8 @@ class OrderResource extends Resource
                                                     $query->whereNull('starts_at')
                                                         ->orWhere('starts_at', '<=', now());
                                                 });
-                                        })
+                                        }
+                                    )
                                     ->getOptionLabelFromRecordUsing(function ($record): string {
                                         return $record->name.($record->trashed() ? ' (Deleted)' : '');
                                     })
@@ -713,7 +714,7 @@ class OrderResource extends Resource
                                             ->formatStateUsing(fn ($state) => $state['name'])
                                             ->visible(static::getProductSettings()->enable_packagings),
                                         TextEntry::make('price_unit')
-                                            ->money(fn ($record) => $record->order->currency->code),
+                                            ->money(fn ($record) => $record->order?->currency?->name ?? $record->order?->company?->currency?->name ?? config('app.currency')),
                                         TextEntry::make('taxes')
                                             ->badge()
                                             ->state(function ($record): array {
@@ -727,7 +728,7 @@ class OrderResource extends Resource
                                             ->suffix('%'),
                                         TextEntry::make('price_subtotal')
                                             ->label(__('purchases::filament/admin/clusters/orders/resources/order.infolist.tabs.products.repeater.products.entries.amount'))
-                                            ->money(fn ($record) => $record->order->currency->code),
+                                            ->money(fn ($record) => $record->order?->currency?->name ?? $record->order?->company?->currency?->name ?? config('app.currency')),
                                     ]),
 
                                 Livewire::make(OrderSummary::class, function ($record) {
@@ -1272,7 +1273,7 @@ class OrderResource extends Resource
 
             $set('product_uom_qty', round($productUOMQty, 2));
 
-            $uom = Uom::find($get('uom_id'));
+            $uom = UOM::find($get('uom_id'));
 
             $productQty = $uom ? $productUOMQty * $uom->factor : $productUOMQty;
 
@@ -1637,9 +1638,11 @@ class OrderResource extends Resource
 
         $orderedQty = (float) OrderLine::query()
             ->where('product_id', $productId)
-            ->whereHas('order', fn ($query) => $query
-                ->where('requisition_id', $requisitionId)
-                ->whereIn('state', [OrderState::PURCHASE->value, OrderState::DONE->value])
+            ->whereHas(
+                'order',
+                fn ($query) => $query
+                    ->where('requisition_id', $requisitionId)
+                    ->whereIn('state', [OrderState::PURCHASE->value, OrderState::DONE->value])
             )
             ->sum('product_qty');
 

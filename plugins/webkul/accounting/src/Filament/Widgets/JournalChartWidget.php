@@ -25,6 +25,7 @@ class JournalChartWidget extends Component
     public function getDashboardData(): array
     {
         $type = $this->journal->type;
+        $currency = $this->journal?->currency?->name ?? $this->journal?->company?->currency?->name ?? config('app.currency');
         $baseQuery = Move::query()
             ->where('journal_id', $this->journal->id)
             ->applyPermissionScope();
@@ -43,7 +44,7 @@ class JournalChartWidget extends Component
                     'url'              => $this->getUrl('index', ['activeTableView' => 'draft']),
                     'value'            => (clone $baseQuery)->where('state', MoveState::DRAFT)->count(),
                     'amount'           => $amount = (clone $baseQuery)->where('state', MoveState::DRAFT)->sum('amount_total'),
-                    'formatted_amount' => money($amount),
+                    'formatted_amount' => money($amount, $currency),
                 ],
                 'unpaid' => [
                     'label' => 'Unpaid',
@@ -58,7 +59,7 @@ class JournalChartWidget extends Component
                         ->where('amount_residual', '>', 0)
                         ->whereNotIn('payment_state', [PaymentState::PAID, PaymentState::IN_PAYMENT])
                         ->sum('amount_residual'),
-                    'formatted_amount' => money($amount),
+                    'formatted_amount' => money($amount, $currency),
                 ],
                 'late' => [
                     'label' => 'Late',
@@ -73,7 +74,7 @@ class JournalChartWidget extends Component
                         ->where('payment_state', PaymentState::NOT_PAID)
                         ->where('invoice_date_due', '<', today())
                         ->sum('amount_residual'),
-                    'formatted_amount' => money($amount),
+                    'formatted_amount' => money($amount, $currency),
                 ],
                 'to_pay' => [
                     'label' => 'To Pay',
@@ -86,7 +87,7 @@ class JournalChartWidget extends Component
                         ->where('state', MoveState::POSTED)
                         ->whereIn('payment_state', [PaymentState::NOT_PAID, PaymentState::PARTIAL])
                         ->sum('amount_residual'),
-                    'formatted_amount' => money($amount),
+                    'formatted_amount' => money($amount, $currency),
                 ],
             ];
         } elseif ($type === JournalType::PURCHASE) {
@@ -96,7 +97,7 @@ class JournalChartWidget extends Component
                     'url'              => $this->getUrl('index', ['activeTableView' => 'draft']),
                     'value'            => (clone $baseQuery)->where('state', MoveState::DRAFT)->count(),
                     'amount'           => $amount = (clone $baseQuery)->where('state', MoveState::DRAFT)->sum('amount_total'),
-                    'formatted_amount' => money($amount),
+                    'formatted_amount' => money($amount, $currency),
                 ],
                 'late' => [
                     'label' => 'Late',
@@ -111,7 +112,7 @@ class JournalChartWidget extends Component
                         ->where('payment_state', PaymentState::NOT_PAID)
                         ->where('invoice_date_due', '<', today())
                         ->sum('amount_residual'),
-                    'formatted_amount' => money($amount),
+                    'formatted_amount' => money($amount, $currency),
                 ],
                 'to_pay' => [
                     'label' => 'To Pay',
@@ -124,7 +125,7 @@ class JournalChartWidget extends Component
                         ->where('state', MoveState::POSTED)
                         ->whereIn('payment_state', [PaymentState::NOT_PAID, PaymentState::PARTIAL])
                         ->sum('amount_residual'),
-                    'formatted_amount' => money($amount),
+                    'formatted_amount' => money($amount, $currency),
                 ],
             ];
         } elseif ($type === JournalType::GENERAL) {
@@ -143,7 +144,7 @@ class JournalChartWidget extends Component
                     'amount' => $amount = (clone $baseQuery)
                         ->where('state', MoveState::POSTED)
                         ->sum('amount_total'),
-                    'formatted_amount' => money($amount),
+                    'formatted_amount' => money($amount, $currency),
                 ],
             ];
         }
@@ -296,7 +297,8 @@ class JournalChartWidget extends Component
                     'label'           => 'Overdue',
                     'data'            => $late,
                     'backgroundColor' => '#ef4444',
-                ], [
+                ],
+                [
                     'label'           => 'On Time',
                     'data'            => $onTime,
                     'backgroundColor' => '#22c55e',

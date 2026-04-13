@@ -53,7 +53,7 @@ class OrderResource extends Resource
                 TextColumn::make('total_amount')
                     ->label(__('purchases::filament/customer/clusters/account/resources/order.table.columns.total-amount'))
                     ->sortable()
-                    ->money(fn (Order $record) => $record->currency->code),
+                    ->money(fn (Order $record) => $record->currency?->name ?? $record->company?->currency?->name ?? config('app.currency')),
             ])
             ->recordActions([
                 ViewAction::make(),
@@ -75,7 +75,7 @@ class OrderResource extends Resource
                                     ->hiddenLabel()
                                     ->size('text-3xl')
                                     ->weight(FontWeight::Bold)
-                                    ->money(fn (Order $record) => $record->currency->code),
+                                    ->money(fn (Order $record) => $record->currency?->name ?? $record->company?->currency?->name ?? config('app.currency')),
 
                                 Actions::make([
                                     Action::make('accept')
@@ -130,7 +130,7 @@ class OrderResource extends Resource
                                         ->icon('heroicon-o-printer')
                                         ->action(function (Order $record) {
                                             if ($record->state == OrderState::SENT) {
-                                                $pdf = PDF::loadView('purchases::filament.admin.clusters.orders.orders.actions.print-quotation', [
+                                                $pdf = Pdf::loadView('purchases::filament.admin.clusters.orders.orders.actions.print-quotation', [
                                                     'records'  => [$record],
                                                 ]);
 
@@ -141,7 +141,7 @@ class OrderResource extends Resource
                                                 }, 'Quotation-'.str_replace('/', '_', $record->name).'.pdf');
                                             }
 
-                                            $pdf = PDF::loadView('purchases::filament.admin.clusters.orders.orders.actions.print-purchase-order', [
+                                            $pdf = Pdf::loadView('purchases::filament.admin.clusters.orders.orders.actions.print-purchase-order', [
                                                 'records'  => [$record],
                                             ]);
 
@@ -225,13 +225,13 @@ class OrderResource extends Resource
                                                     ->label(__('purchases::filament/customer/clusters/account/resources/order.infolist.general.entries.untaxed-amount'))
                                                     ->extraAttributes(['class' => 'flex justify-end'])
                                                     ->inlineLabel()
-                                                    ->money(fn ($record) => $record->currency->code),
+                                                    ->money(fn ($record) => $record->currency?->name ?? $record->company?->currency?->name ?? config('app.currency')),
 
                                                 TextEntry::make('tax_amount')
                                                     ->label(__('purchases::filament/customer/clusters/account/resources/order.infolist.general.entries.tax-amount'))
                                                     ->extraAttributes(['class' => 'flex justify-end'])
                                                     ->inlineLabel()
-                                                    ->money(fn ($record) => $record->currency->code),
+                                                    ->money(fn ($record) => $record->currency?->name ?? $record->company?->currency?->name ?? config('app.currency')),
 
                                                 Group::make()
                                                     ->extraAttributes(['class' => 'border-t pt-4 font-bold'])
@@ -240,7 +240,7 @@ class OrderResource extends Resource
                                                             ->label(__('purchases::filament/customer/clusters/account/resources/order.infolist.general.entries.total'))
                                                             ->extraAttributes(['class' => 'flex justify-end'])
                                                             ->inlineLabel()
-                                                            ->money(fn ($record) => $record->currency->code),
+                                                            ->money(fn ($record) => $record->currency?->name ?? $record->company?->currency?->name ?? config('app.currency')),
                                                     ]),
                                             ])
                                             ->visible(fn (Order $record): bool => in_array($record->state, [OrderState::PURCHASE, OrderState::DONE])),

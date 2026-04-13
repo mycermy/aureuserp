@@ -40,7 +40,7 @@ class ListProducts extends Component implements HasActions, HasForms, HasTable
                     ->formatStateUsing(fn (string $state): string => $state.' Units'),
                 TextColumn::make('price_unit')
                     ->label('Unit Price')
-                    ->money(fn (OrderLine $record) => $record->currency->code),
+                    ->money(fn (OrderLine $record) => $record->currency?->name ?? $record->order?->currency?->name ?? $record->order?->company?->currency?->name ?? config('app.currency')),
                 TextColumn::make('taxes.name')
                     ->label('Taxes')
                     ->badge()
@@ -50,7 +50,7 @@ class ListProducts extends Component implements HasActions, HasForms, HasTable
                     ->suffix('%'),
                 TextColumn::make('price_subtotal')
                     ->label('Amount')
-                    ->money(fn (OrderLine $record) => $record->currency->code),
+                    ->money(fn (OrderLine $record) => $record->currency?->name ?? $record->order?->currency?->name ?? $record->order?->company?->currency?->name ?? config('app.currency')),
             ])
             ->paginated(false);
     }
