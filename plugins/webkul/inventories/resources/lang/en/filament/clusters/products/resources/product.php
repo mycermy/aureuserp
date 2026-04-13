@@ -74,8 +74,7 @@ return [
             'inventory' => [
                 'title' => 'Inventory',
 
-                'entries' => [
-                ],
+                'entries' => [],
 
                 'fieldsets' => [
                     'tracking' => [
@@ -118,6 +117,18 @@ return [
                         ],
                     ],
                 ],
+            ],
+        ],
+    ],
+
+    'table' => [
+        'columns' => [
+            'on-hand-quantity' => 'On Hand Qty',
+        ],
+
+        'header-actions' => [
+            'print-stock-report' => [
+                'label' => 'Download Stock Report',
             ],
         ],
     ],
