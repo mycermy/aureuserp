@@ -8,10 +8,16 @@ use Webkul\Account\Enums as AccountEnums;
 use Webkul\Account\Enums\InvoicePolicy;
 use Webkul\Account\Facades\Account as AccountFacade;
 use Webkul\Account\Facades\Tax;
+use Webkul\Account\Models\Account;
+use Webkul\Account\Models\FiscalPosition;
+use Webkul\Account\Models\Journal as AccountJournal;
 use Webkul\Account\Models\Move as AccountMove;
+use Webkul\Account\Models\Product as AccountProduct;
+use Webkul\Account\Settings\DefaultAccountSettings;
 use Webkul\Inventory\Enums as InventoryEnums;
 use Webkul\Inventory\Facades\Inventory as InventoryFacade;
 use Webkul\Inventory\Models\Location;
+use Webkul\Inventory\Models\Lot;
 use Webkul\Inventory\Models\Move as InventoryMove;
 use Webkul\Inventory\Models\Operation as InventoryOperation;
 use Webkul\Inventory\Models\Product as InventoryProduct;
@@ -354,10 +360,27 @@ class SaleManager
         if ($line->is_expense) {
             $line->qty_delivered_method = 'analytic';
         } else {
-            $line->qty_delivered_method ??= 'stock_move';
+            $line->qty_delivered_method = $this->isStockMoveLine($line)
+                ? QtyDeliveredMethod::STOCK_MOVE
+                : QtyDeliveredMethod::MANUAL;
         }
 
         return $line;
+    }
+
+    protected function isStockMoveLine(OrderLine $line): bool
+    {
+        if (! Package::isPluginInstalled('inventories')) {
+            return false;
+        }
+
+        $product = $line->product;
+
+        if (! $product) {
+            return false;
+        }
+
+        return (bool) ($product->is_storable ?? false);
     }
 
     public function computeOrderLineInvoiceStatus(OrderLine $line): OrderLine
@@ -606,6 +629,8 @@ class SaleManager
         $accountMove = AccountMove::create([
             'move_type'               => AccountEnums\MoveType::OUT_INVOICE,
             'invoice_origin'          => $record->name,
+            'reference'               => $record->client_order_ref ?: $record->name,
+            'payment_reference'       => $record->name,
             'date'                    => now(),
             'company_id'              => $record->company_id,
             'currency_id'             => $record->currency_id,
@@ -622,17 +647,31 @@ class SaleManager
 
         $accountMove = AccountFacade::computeAccountMove($accountMove);
 
+        $accountMove->checked = (bool) $accountMove->journal?->auto_check_on_post;
+        $accountMove->save();
+        $accountMove = AccountFacade::confirmMove($accountMove);
+        $accountMove->refresh();
+
+        if (! $accountMove->name && $accountMove->journal) {
+            $accountMove->computeName();
+            $accountMove->save();
+            $accountMove->refresh();
+        }
+
+        $cogsMove = $this->createCogsMove($record, $accountMove);
+
+        if ($cogsMove && $cogsMove->state === AccountEnums\MoveState::DRAFT) {
+            $cogsMove->checked = (bool) $cogsMove->journal?->auto_check_on_post;
+            $cogsMove->save();
+            AccountFacade::confirmMove($cogsMove);
+        }
+
         return $accountMove;
     }
 
     private function createAccountMoveLine(AccountMove $accountMove, OrderLine $orderLine): void
     {
-        $productInvoicePolicy = $orderLine->product?->invoice_policy;
-        $invoiceSetting = $this->invoiceSettings->invoice_policy->value;
-
-        $quantity = ($productInvoicePolicy ?? $invoiceSetting) === InvoicePolicy::ORDER->value
-            ? $orderLine->product_uom_qty
-            : $orderLine->qty_to_invoice;
+        $quantity = $this->resolveInvoiceQuantity($orderLine);
 
         $accountMoveLine = $accountMove->lines()->create([
             'name'         => $orderLine->name,
@@ -650,6 +689,278 @@ class SaleManager
         $orderLine->accountMoveLines()->sync($accountMoveLine->id);
 
         $accountMoveLine->taxes()->sync($orderLine->taxes->pluck('id'));
+    }
+
+    private function createCogsMove(Order $record, AccountMove $invoiceMove): ?AccountMove
+    {
+        if (! Package::isPluginInstalled('inventories')) {
+            return null;
+        }
+
+        $generalJournalId = $this->resolveGeneralJournalId($record->company_id);
+
+        if (! $generalJournalId) {
+            return null;
+        }
+
+        $allocations = [];
+
+        foreach ($record->lines as $line) {
+            $qtyToCost = $this->resolveInvoiceQuantity($line);
+
+            if ($qtyToCost <= 0) {
+                continue;
+            }
+
+            $expenseAccountId = $this->resolveExpenseAccountId($line->product_id, $record->fiscal_position_id);
+
+            if (! $expenseAccountId) {
+                continue;
+            }
+
+            $stockValuationAccountId = $this->resolveStockValuationAccountId($record->company_id, $expenseAccountId);
+
+            if (! $stockValuationAccountId) {
+                continue;
+            }
+
+            $lineAllocations = $this->resolveLineCostAllocations($line, $qtyToCost);
+
+            foreach ($lineAllocations as $allocation) {
+                $allocation['expense_account_id'] = $expenseAccountId;
+                $allocation['stock_valuation_account_id'] = $stockValuationAccountId;
+                $allocations[] = $allocation;
+            }
+        }
+
+        if (empty($allocations)) {
+            return null;
+        }
+
+        $cogsMove = AccountMove::create([
+            'move_type'      => AccountEnums\MoveType::ENTRY,
+            'invoice_origin' => $record->name,
+            'reference'      => $invoiceMove->name,
+            'date'           => $invoiceMove->date,
+            'company_id'     => $record->company_id,
+            'currency_id'    => $record->currency_id,
+            'partner_id'     => $record->partner_id,
+            'journal_id'     => $generalJournalId,
+        ]);
+
+        $record->accountMoves()->attach($cogsMove->id);
+
+        foreach ($allocations as $allocation) {
+            $amount = round($allocation['quantity'] * $allocation['unit_cost'], 4);
+
+            if ($amount <= 0) {
+                continue;
+            }
+
+            $reference = 'SO-LINE-'.$allocation['order_line_id'].'-COGS';
+            $lotSuffix = $allocation['lot_name'] ? ' ['.$allocation['lot_name'].']' : '';
+            $lineName = $allocation['name'].$lotSuffix;
+
+            $cogsMove->lines()->create([
+                'name'            => $lineName.' COGS',
+                'reference'       => $reference,
+                'date'            => $cogsMove->date,
+                'parent_state'    => $cogsMove->state,
+                'company_id'      => $cogsMove->company_id,
+                'journal_id'      => $cogsMove->journal_id,
+                'currency_id'     => $cogsMove->currency_id,
+                'partner_id'      => $cogsMove->partner_id,
+                'account_id'      => $allocation['expense_account_id'],
+                'display_type'    => AccountEnums\DisplayType::COGS,
+                'product_id'      => $allocation['product_id'],
+                'uom_id'          => $allocation['uom_id'],
+                'quantity'        => $allocation['quantity'],
+                'price_unit'      => $allocation['unit_cost'],
+                'price_subtotal'  => $amount,
+                'price_total'     => $amount,
+                'debit'           => $amount,
+                'credit'          => 0,
+                'balance'         => $amount,
+                'amount_currency' => $amount,
+            ]);
+
+            $cogsMove->lines()->create([
+                'name'            => $lineName.' Stock Valuation',
+                'reference'       => $reference,
+                'date'            => $cogsMove->date,
+                'parent_state'    => $cogsMove->state,
+                'company_id'      => $cogsMove->company_id,
+                'journal_id'      => $cogsMove->journal_id,
+                'currency_id'     => $cogsMove->currency_id,
+                'partner_id'      => $cogsMove->partner_id,
+                'account_id'      => $allocation['stock_valuation_account_id'],
+                'display_type'    => AccountEnums\DisplayType::COGS,
+                'product_id'      => $allocation['product_id'],
+                'uom_id'          => $allocation['uom_id'],
+                'quantity'        => $allocation['quantity'],
+                'price_unit'      => $allocation['unit_cost'],
+                'price_subtotal'  => -$amount,
+                'price_total'     => -$amount,
+                'debit'           => 0,
+                'credit'          => $amount,
+                'balance'         => -$amount,
+                'amount_currency' => -$amount,
+            ]);
+        }
+
+        return AccountFacade::computeAccountMove($cogsMove);
+    }
+
+    private function resolveInvoiceQuantity(OrderLine $orderLine): float
+    {
+        $productInvoicePolicy = $orderLine->product?->invoice_policy;
+        $invoiceSetting = $this->invoiceSettings->invoice_policy->value;
+
+        return (float) (($productInvoicePolicy ?? $invoiceSetting) === InvoicePolicy::ORDER->value
+            ? $orderLine->product_uom_qty
+            : $orderLine->qty_to_invoice);
+    }
+
+    private function resolveLineCostAllocations(OrderLine $line, float $targetQty): array
+    {
+        $allocations = [];
+
+        [$outgoingMoves] = $this->getOutgoingIncomingMoves($line);
+
+        foreach ($outgoingMoves->sortBy('id') as $move) {
+            if ($move->state !== InventoryEnums\MoveState::DONE || $targetQty <= 0) {
+                continue;
+            }
+
+            $move->loadMissing('lines.lot', 'lines.uom');
+
+            foreach ($move->lines->sortBy('id') as $moveLine) {
+                if ($targetQty <= 0) {
+                    break;
+                }
+
+                $lineUom = $moveLine->uom ?? $line->uom;
+                $lineQty = (float) $moveLine->qty;
+
+                if ($lineQty <= 0) {
+                    continue;
+                }
+
+                $qtyInOrderUom = (float) $lineUom->computeQuantity($lineQty, $line->uom, true, 'HALF-UP');
+                $allocatedQty = min($targetQty, $qtyInOrderUom);
+
+                if ($allocatedQty <= 0) {
+                    continue;
+                }
+
+                $allocations[] = [
+                    'order_line_id' => $line->id,
+                    'name'          => $line->name,
+                    'product_id'    => $line->product_id,
+                    'uom_id'        => $line->product_uom_id,
+                    'quantity'      => $allocatedQty,
+                    'unit_cost'     => $this->resolveLotUnitCost($moveLine, $line),
+                    'lot_name'      => $moveLine->lot?->name ?? $moveLine->lot_name,
+                ];
+
+                $targetQty -= $allocatedQty;
+            }
+        }
+
+        if ($targetQty > 0) {
+            $allocations[] = [
+                'order_line_id' => $line->id,
+                'name'          => $line->name,
+                'product_id'    => $line->product_id,
+                'uom_id'        => $line->product_uom_id,
+                'quantity'      => $targetQty,
+                'unit_cost'     => (float) ($line->purchase_price ?? $line->product?->cost ?? 0),
+                'lot_name'      => null,
+            ];
+        }
+
+        return $allocations;
+    }
+
+    private function resolveLotUnitCost($moveLine, OrderLine $line): float
+    {
+        $purchasePrice = $moveLine->lot?->properties['purchase_price'] ?? null;
+
+        if (is_numeric($purchasePrice)) {
+            return (float) $purchasePrice;
+        }
+
+        if ($moveLine->lot_id) {
+            $lot = Lot::query()->find($moveLine->lot_id);
+
+            $purchasePrice = $lot?->properties['purchase_price'] ?? null;
+
+            if (is_numeric($purchasePrice)) {
+                return (float) $purchasePrice;
+            }
+        }
+
+        return (float) ($line->purchase_price ?? $line->product?->cost ?? 0);
+    }
+
+    private function resolveExpenseAccountId(int $productId, ?int $fiscalPositionId): ?int
+    {
+        $product = AccountProduct::query()->with('category')->find($productId);
+
+        if (! $product) {
+            return null;
+        }
+
+        $fiscalPosition = $fiscalPositionId ? FiscalPosition::query()->find($fiscalPositionId) : null;
+
+        $accounts = $product->getAccountsFromFiscalPosition($fiscalPosition);
+
+        if (! empty($accounts['expense']?->id)) {
+            return $accounts['expense']->id;
+        }
+
+        return app(DefaultAccountSettings::class)->expense_account_id;
+    }
+
+    private function resolveStockValuationAccountId(int $companyId, int $fallbackExpenseAccountId): ?int
+    {
+        $query = Account::query()
+            ->where('deprecated', false)
+            ->where(function ($accountQuery) use ($companyId) {
+                $accountQuery
+                    ->whereDoesntHave('companies')
+                    ->orWhereHas('companies', function ($companyQuery) use ($companyId) {
+                        $companyQuery->where('companies.id', $companyId);
+                    });
+            });
+
+        $stockValuationAccount = (clone $query)
+            ->where(function ($accountQuery) {
+                $accountQuery
+                    ->where('code', '110100')
+                    ->orWhereRaw('LOWER(name) like ?', ['%stock valuation%']);
+            })
+            ->first();
+
+        if ($stockValuationAccount?->id) {
+            return $stockValuationAccount->id;
+        }
+
+        $assetAccount = (clone $query)
+            ->where('account_type', AccountEnums\AccountType::ASSET_CURRENT)
+            ->where('id', '!=', $fallbackExpenseAccountId)
+            ->orderBy('id')
+            ->first();
+
+        return $assetAccount?->id;
+    }
+
+    private function resolveGeneralJournalId(int $companyId): ?int
+    {
+        return AccountJournal::query()
+            ->where('company_id', $companyId)
+            ->where('type', AccountEnums\JournalType::GENERAL)
+            ->value('id');
     }
 
     protected function syncInventoryDelivery(Order $record): void
@@ -856,6 +1167,10 @@ class SaleManager
 
     protected function createNewDeliveryForLine(Order $record, OrderLine $line, float $qty): void
     {
+        if (! $this->isStockMoveLine($line)) {
+            return;
+        }
+
         $existingDraftOperation = $record->operations()
             ->whereIn('state', [
                 InventoryEnums\OperationState::DRAFT,
@@ -946,6 +1261,10 @@ class SaleManager
         $rulesToRun = [];
 
         foreach ($record->lines as $line) {
+            if (! $this->isStockMoveLine($line)) {
+                continue;
+            }
+
             $rule = $this->getPullRule($line);
 
             if (! $rule) {
@@ -958,6 +1277,10 @@ class SaleManager
         $rules = [];
 
         foreach ($record->lines as $line) {
+            if (! $this->isStockMoveLine($line)) {
+                continue;
+            }
+
             $rule = $rulesToRun[$line->id];
 
             $pulledMove = $this->runPullRule($rule, $line);
