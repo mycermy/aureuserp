@@ -451,7 +451,7 @@ class VendorPriceResource extends Resource
                                         TextEntry::make('price')
                                             ->label(__('purchases::filament/admin/clusters/configurations/resources/vendor-price.infolist.sections.prices.entries.unit-price'))
                                             ->icon('heroicon-o-banknotes')
-                                            ->money(fn ($record) => $record->currency->code ?? 'USD'),
+                                            ->money(fn ($record) => $record->currency?->name ?? $record->company?->currency?->name ?? config('app.currency')),
 
                                         TextEntry::make('currency.name')
                                             ->label(__('purchases::filament/admin/clusters/configurations/resources/vendor-price.infolist.sections.prices.entries.currency'))

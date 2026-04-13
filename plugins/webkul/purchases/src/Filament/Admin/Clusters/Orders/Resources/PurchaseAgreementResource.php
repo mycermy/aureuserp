@@ -678,7 +678,7 @@ class PurchaseAgreementResource extends Resource
                                         TextEntry::make('uom.name')
                                             ->visible(static::getProductSettings()->enable_uom),
                                         TextEntry::make('price_unit')
-                                            ->money(fn ($record) => $record->requisition->currency->code ?? 'USD'),
+                                            ->money(fn ($record) => $record->requisition?->currency?->name ?? $record->requisition?->company?->currency?->name ?? config('app.currency')),
                                     ])
                                     ->columns([
                                         'sm' => 2,
