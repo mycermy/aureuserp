@@ -506,3 +506,6 @@ php artisan erp:install --force --no-interaction --admin-name="Admin" --admin-em
 
 php artisan workshop-demo:install --no-interaction
 
+
+###
+php artisan tinker --execute="tap(app(\Webkul\Inventory\Settings\TraceabilitySettings::class), fn($s) => [$s->enable_lots_serial_numbers = true, $s->save()]);"

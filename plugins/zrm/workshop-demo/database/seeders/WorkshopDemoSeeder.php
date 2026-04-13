@@ -5,6 +5,7 @@ namespace Zrm\WorkshopDemo\Database\Seeders;
 use Carbon\Carbon;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\DB;
+use Webkul\Inventory\Settings\TraceabilitySettings;
 
 /**
  * WorkshopDemoSeeder
@@ -25,7 +26,7 @@ use Illuminate\Support\Facades\DB;
  *  Reference IDs (seeded by core install):
  *  - company_id          : 1  (DummyCorp LLC)
  *  - user_id             : 1  (Admin)
- *  - currency_id         : 1  (USD)
+ *  - currency_id         : 34  (env: app.currency, e.g. MYR)
  *  - uom Units           : 1  / uom Litres : 20
  *  - WH/Stock loc        : 12 / Vendors : 4 / Customers : 5
  *  - Receipt op type     : 1  / Delivery op type : 2
@@ -46,7 +47,7 @@ class WorkshopDemoSeeder extends Seeder
 
     private int $userId = 1;
 
-    private int $currencyId = 1;
+    private int $currencyId = 34;
 
     private int $uomUnits = 1;   // "Units"
 
@@ -94,9 +95,27 @@ class WorkshopDemoSeeder extends Seeder
 
     private int $acctCogs = 32; // 500000 Cost of Goods Sold
 
+    /** @var array<int, string> */
+    private array $lotTrackedProductKeys = [
+        'oil_0w20',
+        'oil_10w40',
+        'brake_pads',
+    ];
+
     // Populated during seeding
     /** @var array<string, int> */
     private array $productIds = [];
+
+    /** @var array<string, float> */
+    private array $lastLotPurchaseUnitPrices = [];
+
+    /** @var array<string, int> */
+    private array $storableProductKeys = [
+        'oil_0w20',
+        'oil_10w40',
+        'brake_pads',
+        'spark_plugs',
+    ];
 
     private int $supplierPartnerId;
 
@@ -110,20 +129,80 @@ class WorkshopDemoSeeder extends Seeder
         $this->command->info('🔧  Workshop Automation Demo Seeder');
         $this->command->info('═══════════════════════════════════════');
 
+        $this->enableInventoryTraceability();
+        $this->resolveCurrencyFromCompany();
+
         $this->seedProductCategory();
         $this->seedProducts();
         $this->seedPartners();
         $this->seedPurchaseOrder1();
         $this->seedPurchaseOrder2();
         $this->seedPurchaseOrder3();
+        $this->syncProductCostsFromInventory();
         $this->seedSaleOrder1();
         $this->seedSaleOrder2();
         $this->seedPendingTransactions();
+        $this->syncProductCostsFromInventory();
         $this->printStockSummary();
+        $this->printLotCostControlSummary();
 
         $this->command->info('');
         $this->command->info('✅  Workshop demo data created successfully!');
         $this->command->info('');
+    }
+
+    private function enableInventoryTraceability(): void
+    {
+        $traceabilitySettings = app(TraceabilitySettings::class);
+
+        if ($traceabilitySettings->enable_lots_serial_numbers) {
+            return;
+        }
+
+        $traceabilitySettings->enable_lots_serial_numbers = true;
+        $traceabilitySettings->save();
+
+        $this->command->info('▸ Enabled Inventory traceability setting: Lots & Serial Numbers');
+    }
+
+    private function resolveCurrencyFromCompany(): void
+    {
+        $configuredCurrencyCode = strtoupper((string) config('app.currency', 'USD'));
+
+        $configuredCurrencyId = DB::table('currencies')
+            ->where('name', $configuredCurrencyCode)
+            ->value('id');
+
+        if ($configuredCurrencyId) {
+            DB::table('currencies')
+                ->where('id', $configuredCurrencyId)
+                ->update([
+                    'active'     => true,
+                    'updated_at' => now(),
+                ]);
+        }
+
+        $companyCurrencyId = DB::table('companies')
+            ->where('id', $this->companyId)
+            ->value('currency_id');
+
+        if ($companyCurrencyId) {
+            $this->currencyId = (int) $companyCurrencyId;
+
+            return;
+        }
+
+        $fallbackCurrencyId = DB::table('currencies')
+            ->where('name', $configuredCurrencyCode)
+            ->value('id')
+            ?? DB::table('currencies')
+                ->where('active', true)
+                ->value('id')
+            ?? DB::table('currencies')->value('id');
+
+        if ($fallbackCurrencyId) {
+            $this->currencyId = (int) $fallbackCurrencyId;
+        }
     }
 
     // ── 1. Product Category ─────────────────────────────────────────
@@ -139,7 +218,7 @@ class WorkshopDemoSeeder extends Seeder
 
         if ($existing) {
             $this->categoryId = $existing->id;
-            $this->command->info('  (already exists, id=' . $this->categoryId . ')');
+            $this->command->info('  (already exists, id='.$this->categoryId.')');
 
             return;
         }
@@ -154,7 +233,7 @@ class WorkshopDemoSeeder extends Seeder
             'updated_at'  => now(),
         ]);
 
-        $this->command->info('  → id=' . $this->categoryId);
+        $this->command->info('  → id='.$this->categoryId);
     }
 
     // ── 2. Products ─────────────────────────────────────────────────
@@ -234,6 +313,7 @@ class WorkshopDemoSeeder extends Seeder
         ];
 
         foreach ($products as $data) {
+            $isInventoryItem = $data['type'] === 'goods';
             $existing = DB::table('products_products')
                 ->where('reference', $data['reference'])
                 ->whereNull('deleted_at')
@@ -241,33 +321,61 @@ class WorkshopDemoSeeder extends Seeder
 
             if ($existing) {
                 $this->productIds[$data['key']] = $existing->id;
-                $this->command->info('  (skip) ' . $data['name'] . ' — already exists id=' . $existing->id);
+
+                $expectedTracking = $this->usesLotTracking($data['key']) ? 'lot' : 'qty';
+                $updatePayload = [];
+
+                if (($existing->tracking ?? null) !== $expectedTracking) {
+                    $updatePayload['tracking'] = $expectedTracking;
+                }
+
+                if ($isInventoryItem) {
+                    if ((int) ($existing->property_account_income_id ?? 0) !== $this->acctSales) {
+                        $updatePayload['property_account_income_id'] = $this->acctSales;
+                    }
+
+                    if ((int) ($existing->property_account_expense_id ?? 0) !== $this->acctCogs) {
+                        $updatePayload['property_account_expense_id'] = $this->acctCogs;
+                    }
+                }
+
+                if ($updatePayload !== []) {
+                    $updatePayload['updated_at'] = now();
+
+                    DB::table('products_products')
+                        ->where('id', $existing->id)
+                        ->update($updatePayload);
+                }
+
+                $this->command->info('  (skip) '.$data['name'].' — already exists id='.$existing->id);
 
                 continue;
             }
 
             $id = DB::table('products_products')->insertGetId([
-                'type'              => $data['type'],
-                'name'              => $data['name'],
-                'reference'         => $data['reference'],
-                'price'             => $data['price'],
-                'cost'              => $data['cost'],
-                'description'       => $data['description'],
-                'enable_sales'      => 1,
-                'enable_purchase'   => $data['type'] === 'goods' ? 1 : 0,
-                'is_storable'       => $data['type'] === 'goods' ? 1 : 0,
-                'uom_id'            => $data['uom_id'],
-                'uom_po_id'         => $data['uom_po_id'],
-                'category_id'       => $this->categoryId,
-                'company_id'        => $this->companyId,
-                'creator_id'        => $this->userId,
-                'tracking'          => 'qty',
-                'created_at'        => now(),
-                'updated_at'        => now(),
+                'type'                        => $data['type'],
+                'name'                        => $data['name'],
+                'reference'                   => $data['reference'],
+                'price'                       => $data['price'],
+                'cost'                        => $data['cost'],
+                'description'                 => $data['description'],
+                'enable_sales'                => 1,
+                'enable_purchase'             => $data['type'] === 'goods' ? 1 : 0,
+                'is_storable'                 => $data['type'] === 'goods' ? 1 : 0,
+                'uom_id'                      => $data['uom_id'],
+                'uom_po_id'                   => $data['uom_po_id'],
+                'category_id'                 => $this->categoryId,
+                'company_id'                  => $this->companyId,
+                'creator_id'                  => $this->userId,
+                'property_account_income_id'  => $isInventoryItem ? $this->acctSales : null,
+                'property_account_expense_id' => $isInventoryItem ? $this->acctCogs : null,
+                'tracking'                    => $this->usesLotTracking($data['key']) ? 'lot' : 'qty',
+                'created_at'                  => now(),
+                'updated_at'                  => now(),
             ]);
 
             $this->productIds[$data['key']] = $id;
-            $this->command->info('  + ' . $data['name'] . ' (id=' . $id . ')');
+            $this->command->info('  + '.$data['name'].' (id='.$id.')');
         }
     }
 
@@ -317,7 +425,7 @@ class WorkshopDemoSeeder extends Seeder
             ->first();
 
         if ($existing) {
-            $this->command->info('  (skip) ' . $data['name'] . ' — already exists id=' . $existing->id);
+            $this->command->info('  (skip) '.$data['name'].' — already exists id='.$existing->id);
 
             return $existing->id;
         }
@@ -336,7 +444,7 @@ class WorkshopDemoSeeder extends Seeder
             'updated_at'    => now(),
         ]);
 
-        $this->command->info('  + ' . $data['name'] . ' (id=' . $id . ')');
+        $this->command->info('  + '.$data['name'].' (id='.$id.')');
 
         return $id;
     }
@@ -477,7 +585,7 @@ class WorkshopDemoSeeder extends Seeder
                 'product_key'    => 'oil_0w20',
                 'qty'            => 4,
                 'price_unit'     => 45.00,
-                'purchase_price' => 25.00,
+                'purchase_price' => $this->getCurrentProductUnitCost('oil_0w20', 25.00),
                 'uom_id'         => $this->uomLitres,
                 'name'           => 'Engine Oil 0W20 — 4L oil change',
             ],
@@ -485,7 +593,7 @@ class WorkshopDemoSeeder extends Seeder
                 'product_key'    => 'spark_plugs',
                 'qty'            => 4,
                 'price_unit'     => 15.00,
-                'purchase_price' => 8.00,
+                'purchase_price' => $this->getCurrentProductUnitCost('spark_plugs', 8.00),
                 'uom_id'         => $this->uomUnits,
                 'name'           => 'Spark Plugs — set of 4',
             ],
@@ -528,7 +636,7 @@ class WorkshopDemoSeeder extends Seeder
                 'product_key'    => 'brake_pads',
                 'qty'            => 1,
                 'price_unit'     => 75.00,
-                'purchase_price' => 45.00,
+                'purchase_price' => $this->getCurrentProductUnitCost('brake_pads', 45.00),
                 'uom_id'         => $this->uomUnits,
                 'name'           => 'Brake Pads (Front Set) — replacement',
             ],
@@ -536,7 +644,7 @@ class WorkshopDemoSeeder extends Seeder
                 'product_key'    => 'oil_10w40',
                 'qty'            => 4,
                 'price_unit'     => 38.00,
-                'purchase_price' => 20.00,
+                'purchase_price' => $this->getCurrentProductUnitCost('oil_10w40', 20.00),
                 'uom_id'         => $this->uomLitres,
                 'name'           => 'Engine Oil 10W40 — 4L top-up after brake service',
             ],
@@ -571,19 +679,21 @@ class WorkshopDemoSeeder extends Seeder
         Carbon $orderedAt,
         Carbon $receivedAt,
     ): void {
+        $expandedLines = $this->expandPurchaseLinesWithLotPrices($lines);
+
         $existing = DB::table('purchases_orders')->where('name', $reference)->first();
 
         if ($existing) {
-            $this->command->info('  (skip) ' . $reference . ' — already exists');
-            $this->ensurePurchaseAccounting($existing->id, $reference, $lines, $receivedAt);
+            $this->command->info('  (skip) '.$reference.' — already exists');
+            $this->ensurePurchaseAccounting($existing->id, $reference, $expandedLines, $receivedAt);
 
             return;
         }
 
         // ── Compute totals ──────────────────────────────────────────
         $untaxedAmount = array_sum(array_map(
-            fn($l) => $l['qty'] * $l['price_unit'],
-            $lines
+            fn ($l) => $l['qty'] * $l['price_unit'],
+            $expandedLines
         ));
 
         $orderId = DB::table('purchases_orders')->insertGetId([
@@ -618,7 +728,7 @@ class WorkshopDemoSeeder extends Seeder
 
         // ── Create receipt operation (inventory incoming) ───────────
         $operationId = DB::table('inventories_operations')->insertGetId([
-            'name'                    => 'WH/IN/' . $reference,
+            'name'                    => 'WH/IN/'.$reference,
             'origin'                  => $reference,
             'move_type'               => 'direct',
             'state'                   => 'done',
@@ -646,7 +756,7 @@ class WorkshopDemoSeeder extends Seeder
         ]);
 
         // ── Create order lines + inventory moves + update stock ─────
-        foreach ($lines as $line) {
+        foreach ($expandedLines as $line) {
             $productId = $this->productIds[$line['product_key']];
             $subtotal = $line['qty'] * $line['price_unit'];
 
@@ -709,28 +819,59 @@ class WorkshopDemoSeeder extends Seeder
                 'updated_at'              => $receivedAt,
             ]);
 
-            // Inventory move line
-            DB::table('inventories_move_lines')->insert([
-                'state'                   => 'done',
-                'reference'               => 'WH/IN/' . $reference,
-                'qty'                     => $line['qty'],
-                'uom_qty'                 => $line['qty'],
-                'is_picked'               => 1,
-                'scheduled_at'            => $receivedAt,
-                'move_id'                 => $moveId,
-                'operation_id'            => $operationId,
-                'product_id'              => $productId,
-                'uom_id'                  => $line['uom_id'],
-                'source_location_id'      => $this->vendorLocId,
-                'destination_location_id' => $this->stockLocId,
-                'company_id'              => $this->companyId,
-                'creator_id'              => $this->userId,
-                'created_at'              => $receivedAt,
-                'updated_at'              => $receivedAt,
-            ]);
+            if ($this->usesLotTracking($line['product_key'])) {
+                $lotId = $this->createLotForReceipt(
+                    $reference,
+                    $line,
+                    $productId,
+                    $receivedAt,
+                    (int) ($line['lot_index'] ?? 1)
+                );
 
-            // Update (or create) product stock quantity
-            $this->adjustStock($productId, $line['qty']);
+                DB::table('inventories_move_lines')->insert([
+                    'lot_name'                => DB::table('inventories_lots')->where('id', $lotId)->value('name'),
+                    'lot_id'                  => $lotId,
+                    'state'                   => 'done',
+                    'reference'               => 'WH/IN/'.$reference,
+                    'qty'                     => $line['qty'],
+                    'uom_qty'                 => $line['qty'],
+                    'is_picked'               => 1,
+                    'scheduled_at'            => $receivedAt,
+                    'move_id'                 => $moveId,
+                    'operation_id'            => $operationId,
+                    'product_id'              => $productId,
+                    'uom_id'                  => $line['uom_id'],
+                    'source_location_id'      => $this->vendorLocId,
+                    'destination_location_id' => $this->stockLocId,
+                    'company_id'              => $this->companyId,
+                    'creator_id'              => $this->userId,
+                    'created_at'              => $receivedAt,
+                    'updated_at'              => $receivedAt,
+                ]);
+
+                $this->adjustStock($productId, $line['qty'], $lotId, $receivedAt);
+            } else {
+                DB::table('inventories_move_lines')->insert([
+                    'state'                   => 'done',
+                    'reference'               => 'WH/IN/'.$reference,
+                    'qty'                     => $line['qty'],
+                    'uom_qty'                 => $line['qty'],
+                    'is_picked'               => 1,
+                    'scheduled_at'            => $receivedAt,
+                    'move_id'                 => $moveId,
+                    'operation_id'            => $operationId,
+                    'product_id'              => $productId,
+                    'uom_id'                  => $line['uom_id'],
+                    'source_location_id'      => $this->vendorLocId,
+                    'destination_location_id' => $this->stockLocId,
+                    'company_id'              => $this->companyId,
+                    'creator_id'              => $this->userId,
+                    'created_at'              => $receivedAt,
+                    'updated_at'              => $receivedAt,
+                ]);
+
+                $this->adjustStock($productId, $line['qty'], null, $receivedAt);
+            }
         }
 
         $this->command->info(sprintf(
@@ -741,7 +882,7 @@ class WorkshopDemoSeeder extends Seeder
             $operationId,
         ));
 
-        $this->ensurePurchaseAccounting($orderId, $reference, $lines, $receivedAt);
+        $this->ensurePurchaseAccounting($orderId, $reference, $expandedLines, $receivedAt);
     }
 
     // ── Sale Order builder ──────────────────────────────────────────
@@ -760,7 +901,7 @@ class WorkshopDemoSeeder extends Seeder
         $existing = DB::table('sales_orders')->where('name', $reference)->first();
 
         if ($existing) {
-            $this->command->info('  (skip) ' . $reference . ' — already exists');
+            $this->command->info('  (skip) '.$reference.' — already exists');
             $this->ensureSaleAccounting($existing->id, $reference, $customerId, $lines, $deliveredAt);
 
             return;
@@ -768,14 +909,12 @@ class WorkshopDemoSeeder extends Seeder
 
         // Totals
         $amountUntaxed = array_sum(array_map(
-            fn($l) => $l['qty'] * $l['price_unit'],
+            fn ($l) => $l['qty'] * $l['price_unit'],
             $lines
         ));
 
-        $cogsTotal = array_sum(array_map(
-            fn($l) => $l['qty'] * $l['purchase_price'],
-            $lines
-        ));
+        $cogsTotal = 0.0;
+        $accountingLines = [];
 
         $orderId = DB::table('sales_orders')->insertGetId([
             'name'                => $reference,
@@ -809,7 +948,7 @@ class WorkshopDemoSeeder extends Seeder
 
         // Delivery operation (stock → customer)
         $operationId = DB::table('inventories_operations')->insertGetId([
-            'name'                    => 'WH/OUT/' . $reference,
+            'name'                    => 'WH/OUT/'.$reference,
             'origin'                  => $reference,
             'move_type'               => 'direct',
             'state'                   => 'done',
@@ -833,10 +972,33 @@ class WorkshopDemoSeeder extends Seeder
 
         foreach ($lines as $sort => $line) {
             $productId = $this->productIds[$line['product_key']];
+            $isStockableLine = $line['purchase_price'] >= 0 && ! str_starts_with($line['product_key'], 'labor');
+            $lotAllocations = [];
+            $effectivePurchasePrice = (float) $line['purchase_price'];
+
+            if ($isStockableLine && $this->usesLotTracking($line['product_key'])) {
+                $lotAllocations = $this->consumeStockFromLots(
+                    $productId,
+                    (float) $line['qty'],
+                    (float) $line['purchase_price']
+                );
+
+                $lineCogsTotal = (float) array_sum(array_map(
+                    fn (array $allocation): float => $allocation['qty'] * $allocation['unit_cost'],
+                    $lotAllocations
+                ));
+
+                $effectivePurchasePrice = $line['qty'] > 0
+                    ? round($lineCogsTotal / $line['qty'], 4)
+                    : 0.0;
+            } else {
+                $lineCogsTotal = (float) ($line['qty'] * $effectivePurchasePrice);
+            }
+
             $subtotal = $line['qty'] * $line['price_unit'];
-            $margin = ($line['price_unit'] - $line['purchase_price']) * $line['qty'];
+            $margin = ($line['price_unit'] - $effectivePurchasePrice) * $line['qty'];
             $marginPct = $line['price_unit'] > 0
-                ? round(($line['price_unit'] - $line['purchase_price']) / $line['price_unit'] * 100, 2)
+                ? round(($line['price_unit'] - $effectivePurchasePrice) / $line['price_unit'] * 100, 2)
                 : 0;
 
             $saleLineId = DB::table('sales_order_lines')->insertGetId([
@@ -861,10 +1023,10 @@ class WorkshopDemoSeeder extends Seeder
                 'price_reduce_taxinc'        => $line['price_unit'],
                 'price_tax'                  => 0.00,
                 'technical_price_unit'       => $line['price_unit'],
-                'purchase_price'             => $line['purchase_price'],  // ← COGS
+                'purchase_price'             => $effectivePurchasePrice,
                 'margin'                     => $margin,
                 'margin_percent'             => $marginPct,
-                'qty_delivered_method'       => $line['purchase_price'] > 0 ? 'stock_move' : 'manual',
+                'qty_delivered_method'       => $effectivePurchasePrice > 0 ? 'stock_move' : 'manual',
                 'qty_delivered'              => $line['qty'],
                 'qty_invoiced'               => 0,
                 'qty_to_invoice'             => $line['qty'],
@@ -877,8 +1039,20 @@ class WorkshopDemoSeeder extends Seeder
                 'updated_at'                 => $deliveredAt,
             ]);
 
+            $accountingLine = array_merge($line, [
+                'purchase_price' => $effectivePurchasePrice,
+            ]);
+
+            if ($lotAllocations !== []) {
+                $accountingLine['cogs_allocations'] = $lotAllocations;
+            }
+
+            $accountingLines[] = $accountingLine;
+
+            $cogsTotal += $lineCogsTotal;
+
             // Only create stock moves for storable products (not services)
-            if ($line['purchase_price'] >= 0 && ! str_starts_with($line['product_key'], 'labor')) {
+            if ($isStockableLine) {
                 $moveId = DB::table('inventories_moves')->insertGetId([
                     'name'                    => $line['name'],
                     'state'                   => 'done',
@@ -907,27 +1081,52 @@ class WorkshopDemoSeeder extends Seeder
                     'updated_at'              => $deliveredAt,
                 ]);
 
-                DB::table('inventories_move_lines')->insert([
-                    'state'                   => 'done',
-                    'reference'               => 'WH/OUT/' . $reference,
-                    'qty'                     => $line['qty'],
-                    'uom_qty'                 => $line['qty'],
-                    'is_picked'               => 1,
-                    'scheduled_at'            => $deliveredAt,
-                    'move_id'                 => $moveId,
-                    'operation_id'            => $operationId,
-                    'product_id'              => $productId,
-                    'uom_id'                  => $line['uom_id'],
-                    'source_location_id'      => $this->stockLocId,
-                    'destination_location_id' => $this->customerLocId,
-                    'company_id'              => $this->companyId,
-                    'creator_id'              => $this->userId,
-                    'created_at'              => $deliveredAt,
-                    'updated_at'              => $deliveredAt,
-                ]);
+                if ($this->usesLotTracking($line['product_key'])) {
+                    foreach ($lotAllocations as $allocation) {
+                        DB::table('inventories_move_lines')->insert([
+                            'lot_name'                => $allocation['lot_name'] ?: null,
+                            'lot_id'                  => $allocation['lot_id'] > 0 ? $allocation['lot_id'] : null,
+                            'state'                   => 'done',
+                            'reference'               => 'WH/OUT/'.$reference,
+                            'qty'                     => $allocation['qty'],
+                            'uom_qty'                 => $allocation['qty'],
+                            'is_picked'               => 1,
+                            'scheduled_at'            => $deliveredAt,
+                            'move_id'                 => $moveId,
+                            'operation_id'            => $operationId,
+                            'product_id'              => $productId,
+                            'uom_id'                  => $line['uom_id'],
+                            'source_location_id'      => $this->stockLocId,
+                            'destination_location_id' => $this->customerLocId,
+                            'company_id'              => $this->companyId,
+                            'creator_id'              => $this->userId,
+                            'created_at'              => $deliveredAt,
+                            'updated_at'              => $deliveredAt,
+                        ]);
+                    }
+                } else {
+                    DB::table('inventories_move_lines')->insert([
+                        'state'                   => 'done',
+                        'reference'               => 'WH/OUT/'.$reference,
+                        'qty'                     => $line['qty'],
+                        'uom_qty'                 => $line['qty'],
+                        'is_picked'               => 1,
+                        'scheduled_at'            => $deliveredAt,
+                        'move_id'                 => $moveId,
+                        'operation_id'            => $operationId,
+                        'product_id'              => $productId,
+                        'uom_id'                  => $line['uom_id'],
+                        'source_location_id'      => $this->stockLocId,
+                        'destination_location_id' => $this->customerLocId,
+                        'company_id'              => $this->companyId,
+                        'creator_id'              => $this->userId,
+                        'created_at'              => $deliveredAt,
+                        'updated_at'              => $deliveredAt,
+                    ]);
 
-                // Deduct stock
-                $this->adjustStock($productId, -$line['qty']);
+                    // Deduct stock
+                    $this->adjustStock($productId, -$line['qty']);
+                }
             }
         }
 
@@ -940,7 +1139,9 @@ class WorkshopDemoSeeder extends Seeder
             $operationId,
         ));
 
-        $this->ensureSaleAccounting($orderId, $reference, $customerId, $lines, $deliveredAt);
+        $this->syncProductCostsFromInventory();
+
+        $this->ensureSaleAccounting($orderId, $reference, $customerId, $accountingLines, $deliveredAt);
     }
 
     // ── Accounting: Vendor Bill (in_invoice) ─────────────────────────
@@ -960,16 +1161,16 @@ class WorkshopDemoSeeder extends Seeder
     private function createGoodsReceivedEntry(string $reference, array $lines, Carbon $receivedAt): void
     {
         $suffix = substr($reference, strrpos($reference, '/') + 1);
-        $entryName = 'WKSHP/RECV/' . $suffix;
+        $entryName = 'WKSHP/RECV/'.$suffix;
 
         if (DB::table('accounts_account_moves')->where('name', $entryName)->exists()) {
-            $this->command->info('  (skip) Goods-received entry ' . $entryName . ' — already exists');
+            $this->command->info('  (skip) Goods-received entry '.$entryName.' — already exists');
 
             return;
         }
 
         $total = (float) array_sum(array_map(
-            fn($l) => $l['qty'] * $l['price_unit'],
+            fn ($l) => $l['qty'] * $l['price_unit'],
             $lines
         ));
 
@@ -1027,7 +1228,7 @@ class WorkshopDemoSeeder extends Seeder
                 'product_id'               => $productId,
                 'uom_id'                   => $line['uom_id'],
                 'creator_id'               => $this->userId,
-                'name'                     => $line['name'] . ' — Goods Received',
+                'name'                     => $line['name'].' — Goods Received',
                 'display_type'             => 'product',
                 'date'                     => $receivedAt->toDateString(),
                 'quantity'                 => $line['qty'],
@@ -1063,7 +1264,7 @@ class WorkshopDemoSeeder extends Seeder
                 'product_id'               => $productId,
                 'uom_id'                   => $line['uom_id'],
                 'creator_id'               => $this->userId,
-                'name'                     => $line['name'] . ' — Interim Clearing',
+                'name'                     => $line['name'].' — Interim Clearing',
                 'display_type'             => 'product',
                 'date'                     => $receivedAt->toDateString(),
                 'quantity'                 => $line['qty'],
@@ -1111,7 +1312,7 @@ class WorkshopDemoSeeder extends Seeder
     private function ensurePurchaseAccounting(int $orderId, string $reference, array $lines, Carbon $billDate): void
     {
         $billSuffix = substr($reference, strrpos($reference, '/') + 1);
-        $billName = 'WKSHP/BILL/' . $billSuffix;
+        $billName = 'WKSHP/BILL/'.$billSuffix;
 
         // Always create the goods-received stock valuation entry (has its own idempotency).
         $this->createGoodsReceivedEntry($reference, $lines, $billDate);
@@ -1122,7 +1323,7 @@ class WorkshopDemoSeeder extends Seeder
             ->exists();
 
         if ($alreadyLinked) {
-            $this->command->info('  (skip accounting) Vendor bill already exists for ' . $reference);
+            $this->command->info('  (skip accounting) Vendor bill already exists for '.$reference);
             $existingMove = DB::table('accounts_account_moves')->where('name', $billName)->first();
 
             if ($existingMove) {
@@ -1133,7 +1334,7 @@ class WorkshopDemoSeeder extends Seeder
         }
 
         $total = (float) array_sum(array_map(
-            fn($l) => $l['qty'] * $l['price_unit'],
+            fn ($l) => $l['qty'] * $l['price_unit'],
             $lines
         ));
 
@@ -1224,7 +1425,7 @@ class WorkshopDemoSeeder extends Seeder
             'account_id'               => $this->acctPayable,
             'partner_id'               => $this->supplierPartnerId,
             'creator_id'               => $this->userId,
-            'name'                     => $reference . ' — Payable',
+            'name'                     => $reference.' — Payable',
             'display_type'             => 'payment_term',
             'date'                     => $billDate->toDateString(),
             'invoice_date'             => $billDate->toDateString(),
@@ -1287,16 +1488,15 @@ class WorkshopDemoSeeder extends Seeder
     private function ensureSaleAccounting(int $orderId, string $reference, int $customerId, array $lines, Carbon $invoiceDate): void
     {
         $invoiceSuffix = substr($reference, strrpos($reference, '/') + 1);
-        $invoiceName = 'WKSHP/INV/' . $invoiceSuffix;
+        $invoiceName = 'WKSHP/INV/'.$invoiceSuffix;
 
-        // Idempotency: skip if invoice already linked to this SO via invoice_origin
         $alreadyLinked = DB::table('accounts_account_moves')
             ->where('invoice_origin', $reference)
             ->where('move_type', 'out_invoice')
             ->exists();
 
         if ($alreadyLinked) {
-            $this->command->info('  (skip accounting) Customer invoice already exists for ' . $reference);
+            $this->command->info('  (skip accounting) Customer invoice already exists for '.$reference);
             $existingMove = DB::table('accounts_account_moves')->where('name', $invoiceName)->first();
 
             if ($existingMove) {
@@ -1307,14 +1507,24 @@ class WorkshopDemoSeeder extends Seeder
         }
 
         $total = (float) array_sum(array_map(
-            fn($l) => $l['qty'] * $l['price_unit'],
+            fn ($l) => $l['qty'] * $l['price_unit'],
             $lines
         ));
 
-        $cogsTotal = (float) array_sum(array_map(
-            fn($l) => str_starts_with($l['product_key'], 'labor') ? 0.0 : $l['qty'] * $l['purchase_price'],
-            $lines
-        ));
+        $cogsTotal = (float) array_sum(array_map(function ($line): float {
+            if (str_starts_with($line['product_key'], 'labor')) {
+                return 0.0;
+            }
+
+            if (isset($line['cogs_allocations']) && is_array($line['cogs_allocations'])) {
+                return (float) array_sum(array_map(
+                    fn (array $allocation): float => $allocation['qty'] * $allocation['unit_cost'],
+                    $line['cogs_allocations']
+                ));
+            }
+
+            return (float) ($line['qty'] * $line['purchase_price']);
+        }, $lines));
 
         $moveId = DB::table('accounts_account_moves')->insertGetId([
             'name'                               => $invoiceName,
@@ -1349,7 +1559,6 @@ class WorkshopDemoSeeder extends Seeder
             'updated_at'                         => $invoiceDate,
         ]);
 
-        // Revenue lines — CR Product Sales
         foreach ($lines as $sort => $line) {
             $subtotal = round($line['qty'] * $line['price_unit'], 2);
 
@@ -1390,7 +1599,6 @@ class WorkshopDemoSeeder extends Seeder
             ]);
         }
 
-        // Receivable line — DR Account Receivable
         DB::table('accounts_account_move_lines')->insert([
             'sort'                     => count($lines) + 1,
             'move_id'                  => $moveId,
@@ -1403,7 +1611,7 @@ class WorkshopDemoSeeder extends Seeder
             'account_id'               => $this->acctReceivable,
             'partner_id'               => $customerId,
             'creator_id'               => $this->userId,
-            'name'                     => $reference . ' — Receivable',
+            'name'                     => $reference.' — Receivable',
             'display_type'             => 'payment_term',
             'date'                     => $invoiceDate->toDateString(),
             'invoice_date'             => $invoiceDate->toDateString(),
@@ -1426,7 +1634,6 @@ class WorkshopDemoSeeder extends Seeder
             'updated_at'               => $invoiceDate,
         ]);
 
-        // Update SO: mark as invoiced
         DB::table('sales_orders')->where('id', $orderId)->update([
             'invoice_status' => 'invoiced',
         ]);
@@ -1447,7 +1654,6 @@ class WorkshopDemoSeeder extends Seeder
 
         $this->ensureCustomerPayment($moveId, $total, $customerId, $invoiceDate, $invoiceSuffix);
 
-        // COGS recognition entry (DR COGS / CR Stock Valuation) for storable goods
         if ($cogsTotal > 0) {
             $this->createCogsEntry($reference, $invoiceDate, $lines, $cogsTotal);
         }
@@ -1467,7 +1673,7 @@ class WorkshopDemoSeeder extends Seeder
             return;
         }
 
-        $paymentName = 'WKSHP/BNK/PAY/' . $suffix;
+        $paymentName = 'WKSHP/BNK/PAY/'.$suffix;
 
         $paymentMoveId = DB::table('accounts_account_moves')->insertGetId([
             'name'                               => $paymentName,
@@ -1510,7 +1716,7 @@ class WorkshopDemoSeeder extends Seeder
             'account_id'               => $this->acctPayable,
             'partner_id'               => $this->supplierPartnerId,
             'creator_id'               => $this->userId,
-            'name'                     => 'Vendor Payment — ' . $suffix,
+            'name'                     => 'Vendor Payment — '.$suffix,
             'display_type'             => 'payment_term',
             'date'                     => $paymentDate->toDateString(),
             'quantity'                 => 1,
@@ -1544,7 +1750,7 @@ class WorkshopDemoSeeder extends Seeder
             'account_id'               => $this->acctBank,
             'partner_id'               => $this->supplierPartnerId,
             'creator_id'               => $this->userId,
-            'name'                     => 'Bank — ' . $suffix,
+            'name'                     => 'Bank — '.$suffix,
             'display_type'             => 'product',
             'date'                     => $paymentDate->toDateString(),
             'quantity'                 => 1,
@@ -1570,7 +1776,7 @@ class WorkshopDemoSeeder extends Seeder
             'state'                          => 'paid',
             'payment_type'                   => 'outbound',
             'partner_type'                   => 'supplier',
-            'memo'                           => 'Payment for PO/' . $suffix,
+            'memo'                           => 'Payment for PO/'.$suffix,
             'date'                           => $paymentDate->toDateString(),
             'amount'                         => $total,
             'amount_company_currency_signed' => -$total,
@@ -1618,7 +1824,7 @@ class WorkshopDemoSeeder extends Seeder
             return;
         }
 
-        $paymentName = 'WKSHP/BNK/REC/' . $suffix;
+        $paymentName = 'WKSHP/BNK/REC/'.$suffix;
 
         $paymentMoveId = DB::table('accounts_account_moves')->insertGetId([
             'name'                               => $paymentName,
@@ -1661,7 +1867,7 @@ class WorkshopDemoSeeder extends Seeder
             'account_id'               => $this->acctBank,
             'partner_id'               => $customerId,
             'creator_id'               => $this->userId,
-            'name'                     => 'Bank — ' . $suffix,
+            'name'                     => 'Bank — '.$suffix,
             'display_type'             => 'product',
             'date'                     => $paymentDate->toDateString(),
             'quantity'                 => 1,
@@ -1695,7 +1901,7 @@ class WorkshopDemoSeeder extends Seeder
             'account_id'               => $this->acctReceivable,
             'partner_id'               => $customerId,
             'creator_id'               => $this->userId,
-            'name'                     => 'Customer Receipt — ' . $suffix,
+            'name'                     => 'Customer Receipt — '.$suffix,
             'display_type'             => 'payment_term',
             'date'                     => $paymentDate->toDateString(),
             'quantity'                 => 1,
@@ -1721,7 +1927,7 @@ class WorkshopDemoSeeder extends Seeder
             'state'                          => 'paid',
             'payment_type'                   => 'inbound',
             'partner_type'                   => 'customer',
-            'memo'                           => 'Receipt for SO/' . $suffix,
+            'memo'                           => 'Receipt for SO/'.$suffix,
             'date'                           => $paymentDate->toDateString(),
             'amount'                         => $total,
             'amount_company_currency_signed' => $total,
@@ -1768,7 +1974,7 @@ class WorkshopDemoSeeder extends Seeder
      */
     private function createCogsEntry(string $soRef, Carbon $entryDate, array $lines, float $cogsTotal): void
     {
-        $entryName = 'WKSHP/COGS/' . substr($soRef, strrpos($soRef, '/') + 1);
+        $entryName = 'WKSHP/COGS/'.substr($soRef, strrpos($soRef, '/') + 1);
 
         // Idempotency
         if (DB::table('accounts_account_moves')->where('name', $entryName)->exists()) {
@@ -1805,18 +2011,15 @@ class WorkshopDemoSeeder extends Seeder
 
         $sort = 1;
 
-        foreach ($lines as $line) {
-            if (str_starts_with($line['product_key'], 'labor')) {
-                continue;
-            }
-
-            $cogsAmount = round($line['qty'] * $line['purchase_price'], 2);
+        $insertCogsPair = function (array $lineData, float $quantity, float $unitCost, ?string $lotName = null) use (&$sort, $moveId, $entryName, $entryDate): void {
+            $cogsAmount = round($quantity * $unitCost, 2);
 
             if ($cogsAmount <= 0) {
-                continue;
+                return;
             }
 
-            // DR Cost of Goods Sold
+            $lineNameSuffix = $lotName ? ' ['.$lotName.']' : '';
+
             DB::table('accounts_account_move_lines')->insert([
                 'sort'                     => $sort++,
                 'move_id'                  => $moveId,
@@ -1827,14 +2030,14 @@ class WorkshopDemoSeeder extends Seeder
                 'company_currency_id'      => $this->currencyId,
                 'currency_id'              => $this->currencyId,
                 'account_id'               => $this->acctCogs,
-                'product_id'               => $this->productIds[$line['product_key']],
-                'uom_id'                   => $line['uom_id'],
+                'product_id'               => $this->productIds[$lineData['product_key']],
+                'uom_id'                   => $lineData['uom_id'],
                 'creator_id'               => $this->userId,
-                'name'                     => 'COGS — ' . $line['name'],
+                'name'                     => 'COGS — '.$lineData['name'].$lineNameSuffix,
                 'display_type'             => 'product',
                 'date'                     => $entryDate->toDateString(),
-                'quantity'                 => $line['qty'],
-                'price_unit'               => $line['purchase_price'],
+                'quantity'                 => $quantity,
+                'price_unit'               => $unitCost,
                 'price_subtotal'           => $cogsAmount,
                 'price_total'              => $cogsAmount,
                 'discount'                 => 0.00,
@@ -1851,7 +2054,6 @@ class WorkshopDemoSeeder extends Seeder
                 'updated_at'               => $entryDate,
             ]);
 
-            // CR Stock Valuation
             DB::table('accounts_account_move_lines')->insert([
                 'sort'                     => $sort++,
                 'move_id'                  => $moveId,
@@ -1862,14 +2064,14 @@ class WorkshopDemoSeeder extends Seeder
                 'company_currency_id'      => $this->currencyId,
                 'currency_id'              => $this->currencyId,
                 'account_id'               => $this->acctStockVal,
-                'product_id'               => $this->productIds[$line['product_key']],
-                'uom_id'                   => $line['uom_id'],
+                'product_id'               => $this->productIds[$lineData['product_key']],
+                'uom_id'                   => $lineData['uom_id'],
                 'creator_id'               => $this->userId,
-                'name'                     => 'Stock — ' . $line['name'],
+                'name'                     => 'Stock — '.$lineData['name'].$lineNameSuffix,
                 'display_type'             => 'product',
                 'date'                     => $entryDate->toDateString(),
-                'quantity'                 => $line['qty'],
-                'price_unit'               => $line['purchase_price'],
+                'quantity'                 => $quantity,
+                'price_unit'               => $unitCost,
                 'price_subtotal'           => $cogsAmount,
                 'price_total'              => $cogsAmount,
                 'discount'                 => 0.00,
@@ -1885,6 +2087,31 @@ class WorkshopDemoSeeder extends Seeder
                 'created_at'               => $entryDate,
                 'updated_at'               => $entryDate,
             ]);
+        };
+
+        foreach ($lines as $line) {
+            if (str_starts_with($line['product_key'], 'labor')) {
+                continue;
+            }
+
+            if (isset($line['cogs_allocations']) && is_array($line['cogs_allocations'])) {
+                foreach ($line['cogs_allocations'] as $allocation) {
+                    $insertCogsPair(
+                        $line,
+                        (float) $allocation['qty'],
+                        (float) $allocation['unit_cost'],
+                        isset($allocation['lot_name']) ? (string) $allocation['lot_name'] : null
+                    );
+                }
+
+                continue;
+            }
+
+            $insertCogsPair(
+                $line,
+                (float) $line['qty'],
+                (float) $line['purchase_price']
+            );
         }
 
         $this->command->info(sprintf(
@@ -1895,14 +2122,20 @@ class WorkshopDemoSeeder extends Seeder
         ));
     }
 
-    private function adjustStock(int $productId, float $delta): void
+    private function adjustStock(int $productId, float $delta, ?int $lotId = null, ?Carbon $incomingAt = null): void
     {
-        $existing = DB::table('inventories_product_quantities')
+        $query = DB::table('inventories_product_quantities')
             ->where('product_id', $productId)
             ->where('location_id', $this->stockLocId)
-            ->whereNull('lot_id')
-            ->whereNull('package_id')
-            ->first();
+            ->whereNull('package_id');
+
+        if ($lotId) {
+            $query->where('lot_id', $lotId);
+        } else {
+            $query->whereNull('lot_id');
+        }
+
+        $existing = $query->first();
 
         if ($existing) {
             DB::table('inventories_product_quantities')
@@ -1919,13 +2152,390 @@ class WorkshopDemoSeeder extends Seeder
                 'difference_quantity'     => 0,
                 'inventory_diff_quantity' => 0,
                 'inventory_quantity_set'  => 0,
+                'incoming_at'             => ($incomingAt ?? now()),
                 'product_id'              => $productId,
                 'location_id'             => $this->stockLocId,
+                'lot_id'                  => $lotId,
                 'company_id'              => $this->companyId,
                 'creator_id'              => $this->userId,
                 'created_at'              => now(),
                 'updated_at'              => now(),
             ]);
+        }
+    }
+
+    private function usesLotTracking(string $productKey): bool
+    {
+        return in_array($productKey, $this->lotTrackedProductKeys, true);
+    }
+
+    /**
+     * @return array<int, float>
+     */
+    private function splitQuantityIntoRandomLots(float $quantity): array
+    {
+        $quantity = round($quantity, 4);
+
+        if ($quantity <= 0) {
+            return [];
+        }
+
+        $intQuantity = (int) round($quantity);
+
+        if (abs($quantity - $intQuantity) > 0.0001 || $intQuantity <= 1) {
+            return [$quantity];
+        }
+
+        $lotCount = random_int(1, min(3, $intQuantity));
+
+        if ($lotCount === 1) {
+            return [$quantity];
+        }
+
+        $remaining = $intQuantity;
+        $splits = [];
+
+        for ($index = 1; $index < $lotCount; $index++) {
+            $maxForCurrent = $remaining - ($lotCount - $index);
+            $chunk = random_int(1, $maxForCurrent);
+            $splits[] = (float) $chunk;
+            $remaining -= $chunk;
+        }
+
+        $splits[] = (float) $remaining;
+
+        shuffle($splits);
+
+        return $splits;
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $lines
+     * @return array<int, array<string, mixed>>
+     */
+    private function expandPurchaseLinesWithLotPrices(array $lines): array
+    {
+        $expandedLines = [];
+
+        foreach ($lines as $line) {
+            if (! $this->usesLotTracking((string) $line['product_key'])) {
+                $expandedLines[] = $line;
+
+                continue;
+            }
+
+            $lotQuantities = $this->splitQuantityIntoRandomLots((float) $line['qty']);
+
+            foreach ($lotQuantities as $lotIndex => $lotQty) {
+                $lotPriceUnit = $this->nextLotPurchaseUnitPrice(
+                    (string) $line['product_key'],
+                    (float) $line['price_unit']
+                );
+
+                $expandedLines[] = array_merge($line, [
+                    'qty'        => $lotQty,
+                    'price_unit' => $lotPriceUnit,
+                    'lot_index'  => $lotIndex + 1,
+                ]);
+            }
+        }
+
+        return $expandedLines;
+    }
+
+    private function nextLotPurchaseUnitPrice(string $productKey, float $fallbackPrice): float
+    {
+        if (! isset($this->lastLotPurchaseUnitPrices[$productKey])) {
+            $basePrice = round($fallbackPrice, 2);
+            $this->lastLotPurchaseUnitPrices[$productKey] = $basePrice;
+
+            return $basePrice;
+        }
+
+        $previousPrice = $this->lastLotPurchaseUnitPrices[$productKey];
+        $difference = (float) random_int(1, 5);
+        $direction = random_int(0, 1) === 0 ? -1 : 1;
+        $candidatePrice = $previousPrice + ($direction * $difference);
+
+        if ($candidatePrice <= 0) {
+            $candidatePrice = $previousPrice + $difference;
+        }
+
+        $nextPrice = round($candidatePrice, 2);
+        $this->lastLotPurchaseUnitPrices[$productKey] = $nextPrice;
+
+        return $nextPrice;
+    }
+
+    /**
+     * @param  array<string, mixed>  $line
+     */
+    private function createLotForReceipt(string $reference, array $line, int $productId, Carbon $receivedAt, int $index): int
+    {
+        $lotName = str_replace('/', '-', $reference)
+            .'-'
+            .strtoupper((string) $line['product_key'])
+            .'-LOT'
+            .$index;
+
+        $existingLot = DB::table('inventories_lots')
+            ->where('name', $lotName)
+            ->where('product_id', $productId)
+            ->first();
+
+        if ($existingLot) {
+            $existingProperties = is_string($existingLot->properties ?? null)
+                ? json_decode((string) $existingLot->properties, true)
+                : (is_array($existingLot->properties ?? null) ? $existingLot->properties : []);
+
+            if (! is_array($existingProperties)) {
+                $existingProperties = [];
+            }
+
+            if (! array_key_exists('purchase_price', $existingProperties)) {
+                $existingProperties['purchase_price'] = round((float) $line['price_unit'], 2);
+
+                DB::table('inventories_lots')
+                    ->where('id', $existingLot->id)
+                    ->update([
+                        'properties' => json_encode($existingProperties),
+                        'updated_at' => $receivedAt,
+                    ]);
+            }
+
+            return $existingLot->id;
+        }
+
+        return DB::table('inventories_lots')->insertGetId([
+            'name'        => $lotName,
+            'reference'   => $reference,
+            'description' => 'Workshop demo lot for '.$line['name'],
+            'properties'  => json_encode([
+                'purchase_price' => round((float) $line['price_unit'], 2),
+            ]),
+            'product_id'  => $productId,
+            'uom_id'      => $line['uom_id'],
+            'location_id' => $this->stockLocId,
+            'company_id'  => $this->companyId,
+            'creator_id'  => $this->userId,
+            'created_at'  => $receivedAt,
+            'updated_at'  => $receivedAt,
+        ]);
+    }
+
+    /**
+     * @return array<int, array{lot_id:int, lot_name:string, qty:float, unit_cost:float}>
+     */
+    private function consumeStockFromLots(int $productId, float $requestedQty, ?float $fallbackUnitCost = null): array
+    {
+        $remainingQty = round($requestedQty, 4);
+
+        if ($remainingQty <= 0) {
+            return [];
+        }
+
+        $resolvedFallbackUnitCost = $fallbackUnitCost ?? (float) (
+            DB::table('products_products')->where('id', $productId)->value('cost') ?? 0
+        );
+
+        $allocations = [];
+
+        $lotQuantities = DB::table('inventories_product_quantities as pq')
+            ->join('inventories_lots as lot', 'lot.id', '=', 'pq.lot_id')
+            ->where('pq.product_id', $productId)
+            ->where('pq.location_id', $this->stockLocId)
+            ->whereNull('pq.package_id')
+            ->whereNotNull('pq.lot_id')
+            ->where('pq.quantity', '>', 0)
+            ->orderBy('pq.incoming_at')
+            ->orderBy('pq.id')
+            ->select('pq.id', 'pq.quantity', 'pq.lot_id', 'lot.name as lot_name', 'lot.properties as lot_properties')
+            ->get();
+
+        foreach ($lotQuantities as $quantityRow) {
+            if ($remainingQty <= 0) {
+                break;
+            }
+
+            $availableQty = (float) $quantityRow->quantity;
+
+            if ($availableQty <= 0) {
+                continue;
+            }
+
+            $pickedQty = round(min($availableQty, $remainingQty), 4);
+
+            if ($pickedQty <= 0) {
+                continue;
+            }
+
+            DB::table('inventories_product_quantities')
+                ->where('id', $quantityRow->id)
+                ->update([
+                    'quantity'   => max(0, $availableQty - $pickedQty),
+                    'updated_at' => now(),
+                ]);
+
+            $allocations[] = [
+                'lot_id'    => (int) $quantityRow->lot_id,
+                'lot_name'  => (string) $quantityRow->lot_name,
+                'qty'       => $pickedQty,
+                'unit_cost' => $this->resolveLotUnitCost(
+                    (string) $quantityRow->lot_name,
+                    $productId,
+                    $quantityRow->lot_properties,
+                    $resolvedFallbackUnitCost
+                ),
+            ];
+
+            $remainingQty = round($remainingQty - $pickedQty, 4);
+        }
+
+        if ($remainingQty > 0) {
+            $this->adjustStock($productId, -$remainingQty);
+            $allocations[] = [
+                'lot_id'    => 0,
+                'lot_name'  => '',
+                'qty'       => $remainingQty,
+                'unit_cost' => $resolvedFallbackUnitCost,
+            ];
+        }
+
+        return array_values(array_filter(
+            $allocations,
+            fn (array $allocation): bool => $allocation['qty'] > 0
+        ));
+    }
+
+    private function resolveLotUnitCost(string $lotName, int $productId, mixed $lotProperties, float $fallbackUnitCost): float
+    {
+        $properties = [];
+
+        if (is_string($lotProperties) && $lotProperties !== '') {
+            $decoded = json_decode($lotProperties, true);
+            $properties = is_array($decoded) ? $decoded : [];
+        } elseif (is_array($lotProperties)) {
+            $properties = $lotProperties;
+        }
+
+        $propertyCost = isset($properties['purchase_price'])
+            ? (float) $properties['purchase_price']
+            : 0.0;
+
+        if ($propertyCost > 0) {
+            return $propertyCost;
+        }
+
+        if (preg_match('/^PO-WKSHP-(\d+)-[A-Z0-9_]+-LOT(\d+)$/', $lotName, $matches) === 1) {
+            $poReference = sprintf('PO/WKSHP/%03d', (int) $matches[1]);
+            $lotIndex = (int) $matches[2];
+
+            if ($lotIndex > 0) {
+                $purchaseLine = DB::table('purchases_order_lines as pol')
+                    ->join('purchases_orders as po', 'po.id', '=', 'pol.order_id')
+                    ->where('po.name', $poReference)
+                    ->where('pol.product_id', $productId)
+                    ->orderBy('pol.id')
+                    ->skip($lotIndex - 1)
+                    ->first(['pol.price_unit']);
+
+                if ($purchaseLine && (float) $purchaseLine->price_unit > 0) {
+                    return (float) $purchaseLine->price_unit;
+                }
+            }
+        }
+
+        return max(0.0, $fallbackUnitCost);
+    }
+
+    private function getCurrentProductUnitCost(string $productKey, float $fallbackUnitCost): float
+    {
+        $productId = $this->productIds[$productKey] ?? null;
+
+        if (! $productId) {
+            return round($fallbackUnitCost, 4);
+        }
+
+        return $this->getWeightedOnHandUnitCost($productId, $fallbackUnitCost);
+    }
+
+    private function getWeightedOnHandUnitCost(int $productId, float $fallbackUnitCost): float
+    {
+        $lotRows = DB::table('inventories_product_quantities as pq')
+            ->join('inventories_lots as lot', 'lot.id', '=', 'pq.lot_id')
+            ->where('pq.product_id', $productId)
+            ->where('pq.location_id', $this->stockLocId)
+            ->whereNull('pq.package_id')
+            ->whereNotNull('pq.lot_id')
+            ->where('pq.quantity', '>', 0)
+            ->select('pq.quantity', 'lot.name as lot_name', 'lot.properties as lot_properties')
+            ->get();
+
+        if ($lotRows->isNotEmpty()) {
+            $quantityTotal = 0.0;
+            $valueTotal = 0.0;
+
+            foreach ($lotRows as $lotRow) {
+                $qty = (float) $lotRow->quantity;
+
+                if ($qty <= 0) {
+                    continue;
+                }
+
+                $unitCost = $this->resolveLotUnitCost(
+                    (string) $lotRow->lot_name,
+                    $productId,
+                    $lotRow->lot_properties,
+                    $fallbackUnitCost
+                );
+
+                $quantityTotal += $qty;
+                $valueTotal += $qty * $unitCost;
+            }
+
+            if ($quantityTotal > 0) {
+                return round($valueTotal / $quantityTotal, 4);
+            }
+        }
+
+        $nonLotQty = (float) (DB::table('inventories_product_quantities')
+            ->where('product_id', $productId)
+            ->where('location_id', $this->stockLocId)
+            ->whereNull('package_id')
+            ->whereNull('lot_id')
+            ->sum('quantity'));
+
+        if ($nonLotQty > 0) {
+            $productCost = (float) (DB::table('products_products')->where('id', $productId)->value('cost') ?? 0);
+
+            return $productCost > 0 ? round($productCost, 4) : round($fallbackUnitCost, 4);
+        }
+
+        return round($fallbackUnitCost, 4);
+    }
+
+    private function syncProductCostsFromInventory(): void
+    {
+        foreach ($this->storableProductKeys as $productKey) {
+            $productId = $this->productIds[$productKey] ?? null;
+
+            if (! $productId) {
+                continue;
+            }
+
+            $currentCost = (float) (DB::table('products_products')->where('id', $productId)->value('cost') ?? 0);
+            $computedCost = $this->getWeightedOnHandUnitCost($productId, $currentCost);
+
+            if ($computedCost <= 0) {
+                continue;
+            }
+
+            DB::table('products_products')
+                ->where('id', $productId)
+                ->update([
+                    'cost'       => $computedCost,
+                    'updated_at' => now(),
+                ]);
         }
     }
 
@@ -1937,14 +2547,12 @@ class WorkshopDemoSeeder extends Seeder
         $this->command->info('─────────────────────────────────────────────────────────────');
         $this->command->info('  📦  CLOSING STOCK & INVENTORY VALUATION (WH/Stock)');
         $this->command->info('─────────────────────────────────────────────────────────────');
-        $this->command->info(sprintf('  %-34s %6s %8s %12s', 'Product', 'UOM', 'Qty', 'Value (USD)'));
-        $this->command->info('  ' . str_repeat('-', 65));
-
-        $storableKeys = ['oil_0w20', 'oil_10w40', 'brake_pads', 'spark_plugs'];
+        $this->command->info(sprintf('  %-34s %6s %8s %12s', 'Product', 'UOM', 'Qty', 'Value'));
+        $this->command->info('  '.str_repeat('-', 65));
 
         $totalValue = 0;
 
-        foreach ($storableKeys as $key) {
+        foreach ($this->storableProductKeys as $key) {
             if (! isset($this->productIds[$key])) {
                 continue;
             }
@@ -1954,14 +2562,14 @@ class WorkshopDemoSeeder extends Seeder
             $row = DB::table('inventories_product_quantities')
                 ->where('product_id', $productId)
                 ->where('location_id', $this->stockLocId)
-                ->whereNull('lot_id')
                 ->whereNull('package_id')
+                ->selectRaw('COALESCE(SUM(quantity), 0) as qty')
                 ->first();
 
-            $qty = $row ? $row->quantity : 0;
+            $qty = (float) ($row?->qty ?? 0);
 
             $product = DB::table('products_products')->find($productId);
-            $cost = $product ? $product->cost : 0;
+            $cost = $product ? $this->getWeightedOnHandUnitCost($productId, (float) $product->cost) : 0;
             $value = $qty * $cost;
             $totalValue += $value;
 
@@ -1979,7 +2587,7 @@ class WorkshopDemoSeeder extends Seeder
             ));
         }
 
-        $this->command->info('  ' . str_repeat('-', 65));
+        $this->command->info('  '.str_repeat('-', 65));
         $this->command->info(sprintf('  %-34s %6s %8s %12.2f', 'TOTAL INVENTORY VALUE', '', '', $totalValue));
         $this->command->info('─────────────────────────────────────────────────────────────');
 
@@ -1987,7 +2595,7 @@ class WorkshopDemoSeeder extends Seeder
         $this->command->info('  💰  SALES MARGIN SUMMARY');
         $this->command->info('─────────────────────────────────────────────────────────────');
         $this->command->info(sprintf('  %-20s %12s %12s %12s', 'Order', 'Revenue', 'COGS', 'Gross Margin'));
-        $this->command->info('  ' . str_repeat('-', 60));
+        $this->command->info('  '.str_repeat('-', 60));
 
         $orders = DB::table('sales_orders')
             ->where('name', 'like', 'SO/WKSHP/%')
@@ -2022,7 +2630,7 @@ class WorkshopDemoSeeder extends Seeder
             ));
         }
 
-        $this->command->info('  ' . str_repeat('-', 60));
+        $this->command->info('  '.str_repeat('-', 60));
         $this->command->info(sprintf(
             '  %-20s %12.2f %12.2f %12.2f',
             'TOTAL',
@@ -2030,6 +2638,90 @@ class WorkshopDemoSeeder extends Seeder
             $totalCogs,
             $totalRevenue - $totalCogs,
         ));
+        $this->command->info('─────────────────────────────────────────────────────────────');
+    }
+
+    private function printLotCostControlSummary(): void
+    {
+        $this->command->info('');
+        $this->command->info('  🧪  LOT COST CONTROL SUMMARY (PO LOT-TRACKED LINES)');
+        $this->command->info('─────────────────────────────────────────────────────────────');
+        $this->command->info(sprintf('  %-12s %-11s %8s %10s %8s', 'PO', 'Product', 'Qty', 'Unit', 'Δ Prev'));
+        $this->command->info('  '.str_repeat('-', 60));
+
+        $rows = DB::table('purchases_order_lines as pol')
+            ->join('purchases_orders as po', 'po.id', '=', 'pol.order_id')
+            ->join('products_products as p', 'p.id', '=', 'pol.product_id')
+            ->where('po.name', 'like', 'PO/WKSHP/%')
+            ->whereIn('p.tracking', ['lot', 'serial'])
+            ->select(
+                'po.name as purchase_order',
+                'p.reference as product_reference',
+                'pol.product_qty as quantity',
+                'pol.price_unit as unit_price',
+                'pol.id as line_id'
+            )
+            ->orderBy('p.reference')
+            ->orderBy('po.name')
+            ->orderBy('pol.id')
+            ->get();
+
+        if ($rows->isEmpty()) {
+            $this->command->info('  (no lot-tracked purchase lines found)');
+            $this->command->info('─────────────────────────────────────────────────────────────');
+
+            return;
+        }
+
+        $previousPriceByProduct = [];
+
+        foreach ($rows as $row) {
+            $productRef = (string) $row->product_reference;
+            $unitPrice = (float) $row->unit_price;
+            $previousPrice = $previousPriceByProduct[$productRef] ?? null;
+            $deltaText = $previousPrice === null
+                ? 'base'
+                : sprintf('%+.2f', $unitPrice - $previousPrice);
+
+            $this->command->info(sprintf(
+                '  %-12s %-11s %8.2f %10.2f %8s',
+                $row->purchase_order,
+                $productRef,
+                (float) $row->quantity,
+                $unitPrice,
+                $deltaText,
+            ));
+
+            $previousPriceByProduct[$productRef] = $unitPrice;
+        }
+
+        $this->command->info('  '.str_repeat('-', 60));
+
+        $lotCountRows = DB::table('inventories_lots as lot')
+            ->join('products_products as p', 'p.id', '=', 'lot.product_id')
+            ->where('lot.reference', 'like', 'PO/WKSHP/%')
+            ->whereIn('p.tracking', ['lot', 'serial'])
+            ->select(
+                'lot.reference as purchase_order',
+                'p.reference as product_reference',
+                DB::raw('COUNT(*) as lot_count')
+            )
+            ->groupBy('lot.reference', 'p.reference')
+            ->orderBy('p.reference')
+            ->orderBy('lot.reference')
+            ->get();
+
+        $this->command->info('  Lots per PO/Product:');
+
+        foreach ($lotCountRows as $lotCountRow) {
+            $this->command->info(sprintf(
+                '  - %s | %s | lots=%d',
+                $lotCountRow->purchase_order,
+                $lotCountRow->product_reference,
+                (int) $lotCountRow->lot_count,
+            ));
+        }
+
         $this->command->info('─────────────────────────────────────────────────────────────');
     }
 
@@ -2205,7 +2897,7 @@ class WorkshopDemoSeeder extends Seeder
                 'name'           => 'Brake Pads (Front Set)',
                 'qty'            => 2,
                 'price_unit'     => 80.00,     // selling price
-                'purchase_price' => 45.00,     // COGS cost
+                'purchase_price' => $this->getCurrentProductUnitCost('brake_pads', 45.00),
                 'uom_id'         => 1,         // Units
             ],
             [
@@ -2213,18 +2905,19 @@ class WorkshopDemoSeeder extends Seeder
                 'name'           => 'Engine Oil 10W40 (per litre)',
                 'qty'            => 4,
                 'price_unit'     => 38.00,     // selling price
-                'purchase_price' => 20.00,     // COGS cost
+                'purchase_price' => $this->getCurrentProductUnitCost('oil_10w40', 20.00),
                 'uom_id'         => $this->uomLitres,
             ],
         ];
 
-        $total = (float) array_sum(array_map(fn($l) => $l['qty'] * $l['price_unit'], $lines));
-        $cogsTotal = (float) array_sum(array_map(fn($l) => $l['qty'] * $l['purchase_price'], $lines));
+        $total = (float) array_sum(array_map(fn ($l) => $l['qty'] * $l['price_unit'], $lines));
+        $cogsTotal = 0.0;
+        $effectiveCogsLines = [];
 
         // ── Delivery operation (stock → customer) ──────────────────
 
         $operationId = DB::table('inventories_operations')->insertGetId([
-            'name'                    => 'WH/OUT/' . $invoiceName,
+            'name'                    => 'WH/OUT/'.$invoiceName,
             'state'                   => 'done',
             'origin'                  => $invoiceName,
             'move_type'               => 'direct',
@@ -2247,6 +2940,7 @@ class WorkshopDemoSeeder extends Seeder
 
         foreach ($lines as $line) {
             $productId = $this->productIds[$line['product_key']];
+            $effectivePurchasePrice = (float) $line['purchase_price'];
 
             $stockMoveId = DB::table('inventories_moves')->insertGetId([
                 'name'                    => $line['name'],
@@ -2275,27 +2969,80 @@ class WorkshopDemoSeeder extends Seeder
                 'updated_at'              => $invoiceDate,
             ]);
 
-            DB::table('inventories_move_lines')->insert([
-                'state'                   => 'done',
-                'reference'               => 'WH/OUT/' . $invoiceName,
-                'qty'                     => $line['qty'],
-                'uom_qty'                 => $line['qty'],
-                'is_picked'               => 1,
-                'scheduled_at'            => $invoiceDate,
-                'move_id'                 => $stockMoveId,
-                'operation_id'            => $operationId,
-                'product_id'              => $productId,
-                'uom_id'                  => $line['uom_id'],
-                'source_location_id'      => $this->stockLocId,
-                'destination_location_id' => $this->customerLocId,
-                'company_id'              => $this->companyId,
-                'creator_id'              => $this->userId,
-                'created_at'              => $invoiceDate,
-                'updated_at'              => $invoiceDate,
+            if ($this->usesLotTracking($line['product_key'])) {
+                $lotAllocations = $this->consumeStockFromLots(
+                    $productId,
+                    (float) $line['qty'],
+                    (float) $line['purchase_price']
+                );
+
+                $lineCogsTotal = (float) array_sum(array_map(
+                    fn (array $allocation): float => $allocation['qty'] * $allocation['unit_cost'],
+                    $lotAllocations
+                ));
+
+                $effectivePurchasePrice = $line['qty'] > 0
+                    ? round($lineCogsTotal / $line['qty'], 4)
+                    : 0.0;
+
+                foreach ($lotAllocations as $allocation) {
+                    DB::table('inventories_move_lines')->insert([
+                        'lot_name'                => $allocation['lot_name'] ?: null,
+                        'lot_id'                  => $allocation['lot_id'] > 0 ? $allocation['lot_id'] : null,
+                        'state'                   => 'done',
+                        'reference'               => 'WH/OUT/'.$invoiceName,
+                        'qty'                     => $allocation['qty'],
+                        'uom_qty'                 => $allocation['qty'],
+                        'is_picked'               => 1,
+                        'scheduled_at'            => $invoiceDate,
+                        'move_id'                 => $stockMoveId,
+                        'operation_id'            => $operationId,
+                        'product_id'              => $productId,
+                        'uom_id'                  => $line['uom_id'],
+                        'source_location_id'      => $this->stockLocId,
+                        'destination_location_id' => $this->customerLocId,
+                        'company_id'              => $this->companyId,
+                        'creator_id'              => $this->userId,
+                        'created_at'              => $invoiceDate,
+                        'updated_at'              => $invoiceDate,
+                    ]);
+                }
+            } else {
+                $lineCogsTotal = (float) ($line['qty'] * $effectivePurchasePrice);
+
+                DB::table('inventories_move_lines')->insert([
+                    'state'                   => 'done',
+                    'reference'               => 'WH/OUT/'.$invoiceName,
+                    'qty'                     => $line['qty'],
+                    'uom_qty'                 => $line['qty'],
+                    'is_picked'               => 1,
+                    'scheduled_at'            => $invoiceDate,
+                    'move_id'                 => $stockMoveId,
+                    'operation_id'            => $operationId,
+                    'product_id'              => $productId,
+                    'uom_id'                  => $line['uom_id'],
+                    'source_location_id'      => $this->stockLocId,
+                    'destination_location_id' => $this->customerLocId,
+                    'company_id'              => $this->companyId,
+                    'creator_id'              => $this->userId,
+                    'created_at'              => $invoiceDate,
+                    'updated_at'              => $invoiceDate,
+                ]);
+
+                // Deduct on-hand stock
+                $this->adjustStock($productId, -$line['qty']);
+            }
+
+            $cogsTotal += $lineCogsTotal;
+            $effectiveCogsLine = array_merge($line, [
+                'purchase_price' => $effectivePurchasePrice,
             ]);
 
-            // Deduct on-hand stock
-            $this->adjustStock($productId, -$line['qty']);
+            if (isset($lotAllocations) && is_array($lotAllocations) && $lotAllocations !== []) {
+                $effectiveCogsLine['cogs_allocations'] = $lotAllocations;
+            }
+
+            $effectiveCogsLines[] = $effectiveCogsLine;
         }
 
         $this->command->info(sprintf(
@@ -2396,7 +3143,7 @@ class WorkshopDemoSeeder extends Seeder
             'account_id'               => $this->acctReceivable,
             'partner_id'               => $this->customer1Id,
             'creator_id'               => $this->userId,
-            'name'                     => $invoiceName . ' — Receivable',
+            'name'                     => $invoiceName.' — Receivable',
             'display_type'             => 'payment_term',
             'date'                     => $invoiceDate->toDateString(),
             'invoice_date'             => $invoiceDate->toDateString(),
@@ -2429,6 +3176,7 @@ class WorkshopDemoSeeder extends Seeder
 
         // ── COGS recognition entry (DR COGS / CR Stock Valuation) ──
 
-        $this->createCogsEntry($invoiceName, $invoiceDate, $lines, $cogsTotal);
+        $this->createCogsEntry($invoiceName, $invoiceDate, $effectiveCogsLines, $cogsTotal);
+        $this->syncProductCostsFromInventory();
     }
 }
