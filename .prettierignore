@@ -1,0 +1,19 @@
+# Ignore all PHP files (use Pint instead)
+*.php
+*.blade.php
+
+# Laravel directories
+/vendor
+/storage
+/bootstrap/cache
+/public/storage
+/node_modules
+
+# Build outputs
+/public/build
+/public/hot
+
+# Config files that should use specific formatters
+composer.json
+composer.lock
+pint.json

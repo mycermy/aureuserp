@@ -4,6 +4,7 @@ namespace Zrm\WorkshopDemo;
 
 use Filament\Actions\Action;
 use Filament\Panel;
+use Filament\Resources\Pages\Page as ResourcePage;
 use Filament\Tables\Table;
 use Webkul\Account\Filament\Resources\AccountResource as BaseAccountResource;
 use Webkul\Accounting\Filament\Clusters\Configuration\Resources\AccountResource as AccountingAccountResource;
@@ -48,11 +49,11 @@ class WorkshopDemoServiceProvider extends PackageServiceProvider
         Table::configureUsing(function (Table $table): void {
             $livewire = $table->getLivewire();
 
-            if (! is_callable([$livewire, 'getResource'])) {
+            if (! $livewire instanceof ResourcePage) {
                 return;
             }
 
-            $resourceClass = call_user_func([$livewire, 'getResource']);
+            $resourceClass = $livewire::getResource();
 
             if (! in_array($resourceClass, [
                 AccountingAccountResource::class,
@@ -65,7 +66,7 @@ class WorkshopDemoServiceProvider extends PackageServiceProvider
                 Action::make('accountTransactions')
                     ->label('Transactions')
                     ->icon('heroicon-o-book-open')
-                    ->url(fn(Account $record): string => AccountTransactions::getUrl([
+                    ->url(fn (Account $record): string => AccountTransactions::getUrl([
                         'selectedAccount' => $record->getKey(),
                     ])),
             ]);
